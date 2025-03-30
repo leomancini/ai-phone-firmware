@@ -1,0 +1,21 @@
+{
+  "name": "headless-client",
+  "version": "1.0.0",
+  "description": "Headless version of the realtime console client",
+  "main": "client.js",
+  "scripts": {
+    "start": "node client.js"
+  },
+  "dependencies": {
+    "audio-decode": "^2.2.2",
+    "bindings": "^1.5.0",
+    "buffer-alloc": "^1.2.0",
+    "debug": "^4.4.0",
+    "dotenv": "^16.4.7",
+    "node-microphone": "^0.1.6",
+    "node-record-lpcm16": "^1.0.1",
+    "sox": "^0.1.0",
+    "wrtc": "^0.4.7",
+    "ws": "^8.16.0"
+  }
+}
