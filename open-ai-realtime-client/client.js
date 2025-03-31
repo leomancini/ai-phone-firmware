@@ -1,10 +1,16 @@
+// TODO: Handle longer audio responses without cutting off the response
+
 import WebSocket from "ws";
 import fs from "fs";
-import decodeAudio from "audio-decode";
 import { exec, spawn } from "child_process";
 import { Buffer } from "buffer";
 import dotenv from "dotenv";
 import { PassThrough } from "stream";
+
+const audioDir = "./saved_audio";
+if (!fs.existsSync(audioDir)) {
+  fs.mkdirSync(audioDir);
+}
 
 dotenv.config();
 
@@ -27,6 +33,9 @@ let cleanupInProgress = false;
 let playbackPromise = Promise.resolve();
 let totalAudioLength = 0;
 let playbackStartTime = 0;
+let isPlaying = false;
+let audioBuffer = [];
+let isProcessingAudio = false;
 
 function cleanup(exitAfter = true) {
   if (cleanupInProgress) return;
@@ -70,7 +79,6 @@ function cleanup(exitAfter = true) {
 }
 
 process.on("SIGINT", function () {
-  console.log("\nReceived SIGINT signal");
   cleanup(true);
 });
 
@@ -110,7 +118,6 @@ function createWavHeader(dataLength) {
 
 function saveAndPlayAudio(base64Audio) {
   try {
-    console.log("\n=== Processing Server Response ===");
     const audioData = Buffer.from(base64Audio, "base64");
     console.log("Raw audio data length:", audioData.length, "bytes");
 
@@ -149,6 +156,7 @@ function saveAndPlayAudio(base64Audio) {
 }
 
 function startRecording(ws) {
+  console.log("Starting recording...");
   if (isRecording) {
     console.log(
       "Already recording - waiting for current recording to finish..."
@@ -170,102 +178,88 @@ function startRecording(ws) {
   // Clear any existing audio chunks
   responseChunks = [];
 
-  // Wait a moment before starting new recording
-  setTimeout(() => {
-    isRecording = true;
-    console.log("\n=== Starting New Recording Session ===");
-    console.log("Initializing audio capture...");
-    console.log(
-      "Start speaking - VAD will automatically detect voice activity"
-    );
+  isRecording = true;
 
-    const audioDir = "./saved_audio";
-    if (!fs.existsSync(audioDir)) {
-      fs.mkdirSync(audioDir);
+  const tempFile = `${audioDir}/temp_recording.wav`;
+
+  // Record audio continuously to a WAV file
+  recordingProcess = spawn("rec", [
+    "-t",
+    "alsa",
+    "default", // Use default input device
+    "-t",
+    "wav", // Output format
+    tempFile, // Output file
+    "rate",
+    "24k", // Sample rate
+    "channels",
+    "1", // Mono
+    "trim",
+    "0",
+    "2", // Record in 2-second chunks
+    ":" // Loop recording
+  ]);
+
+  let lastSize = 44; // Start after WAV header
+
+  // Check for new data every 100ms
+  const checkInterval = setInterval(() => {
+    try {
+      if (!fs.existsSync(tempFile)) return;
+
+      const stats = fs.statSync(tempFile);
+      if (stats.size > lastSize) {
+        const fd = fs.openSync(tempFile, "r");
+        const buffer = Buffer.alloc(stats.size - lastSize);
+
+        fs.readSync(fd, buffer, 0, stats.size - lastSize, lastSize);
+        fs.closeSync(fd);
+
+        // Send the new data
+        ws.send(
+          JSON.stringify({
+            type: "input_audio_buffer.append",
+            audio: buffer.toString("base64")
+          })
+        );
+
+        lastSize = stats.size;
+      }
+    } catch (error) {
+      if (!error.message.includes("ENOENT")) {
+        console.error("Error reading audio data:", error);
+      }
     }
+  }, 100);
 
-    const tempFile = `${audioDir}/temp_recording.wav`;
+  recordingProcess.stderr.on("data", (data) => {
+    const info = data.toString().toLowerCase();
+    if (info.includes("error") || info.includes("warning")) {
+      console.log("Recording debug:", info);
+    } else {
+      console.log("Audio info:", info);
+    }
+  });
 
-    // Record audio continuously to a WAV file
-    recordingProcess = spawn("rec", [
-      "-t",
-      "alsa",
-      "default", // Use default input device
-      "-t",
-      "wav", // Output format
-      tempFile, // Output file
-      "rate",
-      "24k", // Sample rate
-      "channels",
-      "1", // Mono
-      "trim",
-      "0",
-      "2", // Record in 2-second chunks
-      ":" // Loop recording
-    ]);
+  recordingProcess.on("error", (error) => {
+    console.error("Recording process error:", error);
+    clearInterval(checkInterval);
+    isRecording = false;
+    recordingProcess = null;
+    try {
+      fs.unlinkSync(tempFile);
+    } catch (e) {}
+  });
 
-    let lastSize = 44; // Start after WAV header
-    const CHUNK_SIZE = 48000; // 2 seconds of audio at 24kHz
-
-    // Check for new data every 100ms
-    const checkInterval = setInterval(() => {
-      try {
-        if (!fs.existsSync(tempFile)) return;
-
-        const stats = fs.statSync(tempFile);
-        if (stats.size > lastSize) {
-          const fd = fs.openSync(tempFile, "r");
-          const buffer = Buffer.alloc(stats.size - lastSize);
-
-          fs.readSync(fd, buffer, 0, stats.size - lastSize, lastSize);
-          fs.closeSync(fd);
-
-          // Send the new data
-          ws.send(
-            JSON.stringify({
-              type: "input_audio_buffer.append",
-              audio: buffer.toString("base64")
-            })
-          );
-
-          lastSize = stats.size;
-        }
-      } catch (error) {
-        if (!error.message.includes("ENOENT")) {
-          console.error("Error reading audio data:", error);
-        }
-      }
-    }, 100);
-
-    recordingProcess.stderr.on("data", (data) => {
-      const info = data.toString().toLowerCase();
-      if (info.includes("error") || info.includes("warning")) {
-        console.log("Recording debug:", info);
-      } else {
-        console.log("Audio info:", info);
-      }
-    });
-
-    recordingProcess.on("error", (error) => {
-      console.error("Recording process error:", error);
-      clearInterval(checkInterval);
-      isRecording = false;
-      recordingProcess = null;
-      try {
-        fs.unlinkSync(tempFile);
-      } catch (e) {}
-    });
-
-    recordingProcess.on("close", () => {
-      console.log("Recording stopped");
-      clearInterval(checkInterval);
-      isRecording = false;
-      recordingProcess = null;
-      try {
-        fs.unlinkSync(tempFile);
-      } catch (e) {}
-    });
-  }, 1000);
+  recordingProcess.on("close", () => {
+    console.log("Recording stopped");
+    clearInterval(checkInterval);
+    isRecording = false;
+    recordingProcess = null;
+    try {
+      fs.unlinkSync(tempFile);
+    } catch (e) {}
+  });
 }
 
 function floatTo16BitPCM(float32Array) {
@@ -290,11 +284,10 @@ function base64EncodeAudio(float32Array) {
   return btoa(binary);
 }
 
-function playAudioChunk(base64Audio) {
+async function playAudioChunk(base64Audio) {
   try {
     // Stop recording before playing audio
     if (recordingProcess) {
-      console.log("Pausing recording for playback...");
       recordingProcess.kill("SIGTERM");
       recordingProcess = null;
       isRecording = false;
@@ -302,11 +295,20 @@ function playAudioChunk(base64Audio) {
 
     const audioData = Buffer.from(base64Audio, "base64");
     totalAudioLength += audioData.length;
+    audioBuffer.push(audioData);
+
+    // If we're already processing audio, just add to buffer
+    if (isProcessingAudio) {
+      return;
+    }
+
+    isProcessingAudio = true;
 
     // Initialize stream and playback process if not already running
     if (!audioStream || !playbackProcess) {
       audioStream = new PassThrough();
       playbackStartTime = Date.now();
+      isPlaying = true;
 
       // Create WAV header for the stream
       const header = createWavHeader(1000000); // Use a large enough size
@@ -327,13 +329,33 @@ function playAudioChunk(base64Audio) {
         "vol",
         "5",
         "pad",
-        "0.2", // Add padding at start
-        "0.5", // Add padding at end
+        "0.5",
+        "0.5",
         "gain",
-        "-n", // Normalize audio
-        "dither", // Add dither for smoother playback
-        "-s" // Show progress
+        "-n",
+        "silence",
+        "1",
+        "0.1",
+        "1%",
+        "delay",
+        "0.5"
       ]);
+
+      // Handle errors on the audio stream
+      audioStream.on("error", (error) => {
+        if (error.code !== "EPIPE") {
+          console.error("Audio stream error:", error);
+        }
+        cleanupAudio();
+      });
+
+      // Handle errors on the playback process stdin
+      playbackProcess.stdin.on("error", (error) => {
+        if (error.code !== "EPIPE") {
+          console.error("Playback stdin error:", error);
+        }
+        cleanupAudio();
+      });
 
       // Pipe audio stream to sox
       audioStream.pipe(playbackProcess.stdin);
@@ -341,31 +363,91 @@ function playAudioChunk(base64Audio) {
       // Handle playback process events
       playbackProcess.on("error", (error) => {
         console.error("Playback error:", error);
+        cleanupAudio();
       });
 
-      playbackProcess.stderr.on("data", (data) => {
-        const info = data.toString();
-        if (!info.includes("PROGRESS")) {
-          console.log("Playback info:", info);
+      // Wait for the stream to be ready before writing data
+      playbackProcess.stdin.on("drain", () => {
+        if (audioStream && !audioStream.destroyed) {
+          audioStream.resume();
         }
-      });
-
-      playbackProcess.stdout.on("data", (data) => {
-        console.log("Playback progress:", data.toString());
       });
 
       playbackProcess.on("close", (code) => {
         console.log(`Playback process closed with code ${code}`);
-        audioStream = null;
-        playbackProcess = null;
+        cleanupAudio();
       });
     }
 
-    // Write chunk to the stream
-    audioStream.write(audioData);
+    // Process all buffered chunks
+    while (audioBuffer.length > 0) {
+      const chunk = audioBuffer.shift();
+      if (
+        audioStream &&
+        !audioStream.destroyed &&
+        playbackProcess &&
+        !playbackProcess.killed
+      ) {
+        try {
+          const canWrite = audioStream.write(chunk);
+          if (!canWrite) {
+            audioStream.pause();
+            // Put the chunk back in the buffer if we couldn't write it
+            audioBuffer.unshift(chunk);
+            break;
+          }
+        } catch (error) {
+          if (error.code !== "EPIPE") {
+            console.error("Error writing to audio stream:", error);
+          }
+          cleanupAudio();
+          break;
+        }
+      } else {
+        break;
+      }
+    }
+
+    isProcessingAudio = false;
   } catch (error) {
     console.error("Error playing audio chunk:", error);
+    cleanupAudio();
+    isProcessingAudio = false;
   }
+}
+
+function cleanupAudio() {
+  if (audioStream) {
+    try {
+      if (!audioStream.destroyed) {
+        audioStream.end();
+      }
+      audioStream = null;
+    } catch (error) {
+      if (error.code !== "EPIPE") {
+        console.error("Error cleaning up audio stream:", error);
+      }
+      audioStream = null;
+    }
+  }
+
+  if (playbackProcess) {
+    try {
+      if (!playbackProcess.killed) {
+        playbackProcess.kill();
+      }
+      playbackProcess = null;
+    } catch (error) {
+      console.error("Error cleaning up playback process:", error);
+      playbackProcess = null;
+    }
+  }
+
+  totalAudioLength = 0;
+  playbackStartTime = 0;
+  isPlaying = false;
+  audioBuffer = [];
+  isProcessingAudio = false;
 }
 
 function endAudioPlayback() {
@@ -375,28 +457,32 @@ function endAudioPlayback() {
       return;
     }
 
-    console.log("Waiting for playback to complete...");
-
-    // End the audio stream first
-    if (audioStream) {
-      audioStream.end();
-    }
-
     if (playbackProcess) {
       // Wait for the playback process to finish naturally
       playbackProcess.once("close", () => {
-        console.log("Playback process finished naturally");
-        audioStream = null;
-        playbackProcess = null;
-        totalAudioLength = 0;
-        playbackStartTime = 0;
-
-        // Add a longer delay after playback finishes
-        setTimeout(resolve, 1000);
+        cleanupAudio();
+        resolve();
       });
 
       // End the process input
-      playbackProcess.stdin.end();
+      if (audioStream && !audioStream.destroyed) {
+        try {
+          audioStream.end(() => {
+            if (playbackProcess && !playbackProcess.killed) {
+              playbackProcess.stdin.end();
+            }
+          });
+        } catch (error) {
+          if (error.code !== "EPIPE") {
+            console.error("Error ending audio stream:", error);
+          }
+          cleanupAudio();
+          resolve();
+        }
+      } else {
+        cleanupAudio();
+        resolve();
+      }
     } else {
       resolve();
     }
@@ -404,8 +490,7 @@ function endAudioPlayback() {
 }
 
 ws.on("open", async function open() {
-  console.log("Connected to server.");
-  console.log("Waiting for session to be created...");
+  console.log("Connected to OpenAI Realtime API");
 });
 
 ws.on("message", async function handleEvent(message) {
@@ -433,35 +518,31 @@ ws.on("message", async function handleEvent(message) {
       })
     );
 
-    console.log("\nStarting first recording...");
+    console.log("\nStarting recording...");
     startRecording(ws);
   } else if (serverEvent.type === "response.audio.delta") {
     console.log("Received audio chunk:", serverEvent.delta.length, "bytes");
+
+    // Stop recording on first audio chunk to prevent feedback
+    if (recordingProcess && responseChunks.length === 0) {
+      console.log("Stopping recording...");
+      recordingProcess.kill("SIGTERM");
+      recordingProcess = null;
+      isRecording = false;
+    }
+
     responseChunks.push(serverEvent.delta);
     await playAudioChunk(serverEvent.delta);
   } else if (serverEvent.type === "response.content_part.done") {
-    console.log("\n=== Response Audio Ready ===");
-    console.log("Transcript:", serverEvent.part.transcript);
+    console.log("Response:", serverEvent.part.transcript);
 
-    // Wait longer for any remaining audio chunks to be processed
+    // Wait a bit to ensure all chunks are played
     await new Promise((resolve) => setTimeout(resolve, 1000));
 
-    // Ensure playback completes
-    console.log("Finishing playback...");
+    // Wait for all audio to finish playing before starting recording again
     await endAudioPlayback();
-    console.log("Playback finished completely");
-
-    // Add extra buffer time after playback
-    await new Promise((resolve) => setTimeout(resolve, 500));
-
-    responseChunks = [];
-
-    // Add a longer delay before starting next recording
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    console.log("\nStarting next recording...");
+    console.log("Playback finished!");
     startRecording(ws);
-  } else if (serverEvent.type === "response.end") {
-    console.log("Full response completed");
   }
 });
 
