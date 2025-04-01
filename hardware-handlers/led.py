@@ -1,6 +1,6 @@
-import subprocess
-import time
 import sys
+import time
+import subprocess
 
 def run_command(command):
     """Run a shell command and return the output."""
@@ -13,6 +13,11 @@ def run_command(command):
     except Exception as e:
         print(f"Error running command: {e}")
         return False
+
+def setup_gpio():
+    """Configure GPIO4 as an output."""
+    print("Setting GPIO4 as output")
+    return run_command("raspi-gpio set 4 op")
 
 def led_on():
     """Turn the LED on."""
@@ -51,16 +56,21 @@ def check_led_status():
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python3 led_control.py {on|off|blink|status} [blink_count] [delay]")
+        print("Usage: python3 led_control.py {setup|on|off|blink|status} [blink_count] [delay]")
         sys.exit(1)
     
     command = sys.argv[1].lower()
     
-    if command == "on":
+    if command == "setup":
+        setup_gpio()
+    elif command == "on":
+        setup_gpio()  # Ensure pin is set as output before setting value
         led_on()
     elif command == "off":
+        setup_gpio()  # Ensure pin is set as output before setting value
         led_off()
     elif command == "blink":
+        setup_gpio()  # Ensure pin is set as output before setting value
         count = int(sys.argv[2]) if len(sys.argv) > 2 else 5
         delay = float(sys.argv[3]) if len(sys.argv) > 3 else 0.5
         led_blink(count, delay)
@@ -68,5 +78,5 @@ if __name__ == "__main__":
         check_led_status()
     else:
         print(f"Unknown command: {command}")
-        print("Usage: python3 led_control.py {on|off|blink|status} [blink_count] [delay]")
+        print("Usage: python3 led_control.py {setup|on|off|blink|status} [blink_count] [delay]")
         sys.exit(1)
