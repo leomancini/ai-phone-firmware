@@ -6,6 +6,7 @@ import { exec, spawn } from "child_process";
 import { Buffer } from "buffer";
 import dotenv from "dotenv";
 import { PassThrough } from "stream";
+import path from "path";
 
 const audioDir = "./saved_audio";
 if (!fs.existsSync(audioDir)) {
@@ -16,13 +17,8 @@ dotenv.config();
 
 const url =
   "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17";
-const ws = new WebSocket(url, {
-  headers: {
-    Authorization: "Bearer " + process.env.OPENAI_API_KEY,
-    "OpenAI-Beta": "realtime=v1"
-  }
-});
 
+let ws = null;
 let responseChunks = [];
 let sessionId = null;
 let isRecording = false;
@@ -37,6 +33,59 @@ let isPlaying = false;
 let audioBuffer = [];
 let isProcessingAudio = false;
 
+// Get status file path
+const STATUS_FILE = "/tmp/handset_status.txt";
+
+// Track handset state
+let isHandsetUp = false; // Start with handset DOWN
+
+// Watch the status file for changes
+fs.watch(STATUS_FILE, (eventType, filename) => {
+  if (eventType === "change") {
+    fs.readFile(STATUS_FILE, "utf8", (err, data) => {
+      if (err) {
+        console.error("Error reading status file:", err);
+        return;
+      }
+
+      const command = data.trim();
+      if (command === "stop") {
+        console.log("Handset DOWN - Stopping all processing...");
+        isHandsetUp = false;
+        cleanup(false); // Don't exit process, just clean up resources
+      } else if (command === "start") {
+        console.log("Handset UP - Starting new session...");
+        isHandsetUp = true;
+
+        // Create new WebSocket connection
+        ws = new WebSocket(url, {
+          headers: {
+            Authorization: "Bearer " + process.env.OPENAI_API_KEY,
+            "OpenAI-Beta": "realtime=v1"
+          }
+        });
+
+        // Set up WebSocket event handlers
+        ws.on("open", async function open() {
+          console.log("Connected to OpenAI Realtime API");
+          startRecording(ws);
+        });
+
+        ws.on("message", handleEvent);
+        ws.on("error", function error(err) {
+          console.error("WebSocket error:", err);
+          cleanup(false); // Don't exit process, just clean up resources
+        });
+
+        ws.on("close", function close() {
+          console.log("WebSocket connection closed");
+          cleanup(false); // Don't exit process, just clean up resources
+        });
+      }
+    });
+  }
+});
+
 function cleanup(exitAfter = true) {
   if (cleanupInProgress) return;
   cleanupInProgress = true;
@@ -47,6 +96,7 @@ function cleanup(exitAfter = true) {
   if (recordingProcess) {
     recordingProcess.kill("SIGTERM");
     recordingProcess = null;
+    isRecording = false;
   }
 
   // Stop playback
@@ -54,21 +104,33 @@ function cleanup(exitAfter = true) {
 
   // Clear any pending audio
   responseChunks = [];
+  audioBuffer = [];
+  isProcessingAudio = false;
+  isPlaying = false;
+  totalAudioLength = 0;
+  playbackStartTime = 0;
 
-  // Send session end message
-  if (ws && ws.readyState === WebSocket.OPEN) {
+  // Close WebSocket connection
+  if (ws) {
     try {
-      ws.send(JSON.stringify({ type: "session.end" }));
-
-      // Wait briefly for the message to be sent
-      setTimeout(() => {
-        ws.close();
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "session.end" }));
+        setTimeout(() => {
+          ws.close();
+          ws = null;
+          if (exitAfter) {
+            process.exit(0);
+          }
+        }, 500);
+      } else {
+        ws = null;
         if (exitAfter) {
           process.exit(0);
         }
-      }, 500);
+      }
     } catch (e) {
       console.error("Error during cleanup:", e);
+      ws = null;
       if (exitAfter) {
         process.exit(1);
       }
@@ -76,6 +138,8 @@ function cleanup(exitAfter = true) {
   } else if (exitAfter) {
     process.exit(0);
   }
+
+  cleanupInProgress = false;
 }
 
 process.on("SIGINT", function () {
@@ -156,6 +220,11 @@ function saveAndPlayAudio(base64Audio) {
 }
 
 function startRecording(ws) {
+  if (!isHandsetUp) {
+    console.log("Handset is DOWN - not starting recording");
+    return;
+  }
+
   console.log("Starting recording...");
   if (isRecording) {
     console.log(
@@ -489,11 +558,12 @@ function endAudioPlayback() {
   });
 }
 
-ws.on("open", async function open() {
-  console.log("Connected to OpenAI Realtime API");
-});
+function handleEvent(message) {
+  if (!isHandsetUp) {
+    console.log("Handset is DOWN - ignoring incoming messages");
+    return;
+  }
 
-ws.on("message", async function handleEvent(message) {
   const serverEvent = JSON.parse(message.toString());
 
   if (serverEvent.type === "session.created") {
@@ -532,26 +602,21 @@ ws.on("message", async function handleEvent(message) {
     }
 
     responseChunks.push(serverEvent.delta);
-    await playAudioChunk(serverEvent.delta);
+    playAudioChunk(serverEvent.delta);
   } else if (serverEvent.type === "response.content_part.done") {
     console.log("Response:", serverEvent.part.transcript);
 
     // Wait a bit to ensure all chunks are played
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-
-    // Wait for all audio to finish playing before starting recording again
-    await endAudioPlayback();
-    console.log("Playback finished!");
-    startRecording(ws);
+    setTimeout(async () => {
+      await endAudioPlayback();
+      console.log("Playback finished!");
+      startRecording(ws);
+    }, 1000);
   }
-});
+}
 
-ws.on("error", function error(err) {
-  console.error("WebSocket error:", err);
-  cleanup(true);
-});
-
-ws.on("close", function close() {
-  console.log("WebSocket connection closed");
+// Add SIGTERM handler
+process.on("SIGTERM", () => {
+  console.log("Received SIGTERM - Cleaning up...");
   cleanup(true);
 });
