@@ -4,9 +4,6 @@ import os
 import glob
 import signal
 import sys
-import asyncio
-import json
-import websockets
 import logging
 import time
 
@@ -265,59 +262,10 @@ class Speaker:
         # Play the ringtone
         logger.info(f"Playing ringtone: {ringtone_path}")
         self.play_ringtone(ringtone_path)
-    
-    async def start_websocket_listener(self, host="0.0.0.0", port=8766):
-        """Start a WebSocket server to listen for ring events.
-        
-        Args:
-            host (str, optional): Host to bind to. Defaults to "0.0.0.0".
-            port (int, optional): Port to bind to. Defaults to 8766.
-        """
-        logger.info(f"Starting WebSocket server on {host}:{port}")
-        
-        async def handle_websocket(websocket, path):
-            client_info = f"{websocket.remote_address[0]}:{websocket.remote_address[1]}"
-            logger.info(f"New WebSocket connection from {client_info}")
-            
-            try:
-                async for message in websocket:
-                    logger.debug(f"Received message from {client_info}: {message}")
-                    try:
-                        data = json.loads(message)
-                        logger.debug(f"Parsed JSON data: {data}")
-                        
-                        if "event" in data:
-                            if data["event"] == "ring":
-                                ringtone_name = data.get("ringtone", "telephone-ring-02.wav")
-                                logger.info(f"Received ring event with ringtone: {ringtone_name}")
-                                
-                                # Use asyncio to run the blocking play_ringtone in a separate thread
-                                await asyncio.get_event_loop().run_in_executor(
-                                    None, self.handle_ring_event, ringtone_name
-                                )
-                            elif data["event"] == "stop":
-                                logger.info("Received stop event")
-                                
-                                # Use asyncio to run the blocking stop_ringtone in a separate thread
-                                await asyncio.get_event_loop().run_in_executor(
-                                    None, self.stop_ringtone
-                                )
-                        else:
-                            logger.warning(f"Received message with unknown event: {data.get('event', 'none')}")
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Invalid JSON received from {client_info}: {message}, error: {e}")
-            except websockets.exceptions.ConnectionClosed:
-                logger.info(f"WebSocket connection closed from {client_info}")
-            except Exception as e:
-                logger.error(f"Error handling WebSocket connection from {client_info}: {e}", exc_info=True)
-        
-        server = await websockets.serve(handle_websocket, host, port)
-        logger.info(f"Speaker WebSocket server listening on ws://{host}:{port}")
-        await server.wait_closed()
 
 
 def main():
-    """Main function to play a WAV file from ~/ringers/ at maximum system volume."""
+    """Main function to play a WAV file from ~/ai-phone-firmware/ringtones/ at maximum system volume."""
     print("Playing ringtone test on Raspberry Pi...")
     print("Target device: USB Audio: UACDemoV10 [UACDemoV1.0], device 0 (card 2)")
     
