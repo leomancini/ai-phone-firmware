@@ -193,6 +193,19 @@ function saveAndPlayAudio(base64Audio) {
 
 function startRecording(ws) {
   console.log("Starting recording...");
+
+  // Ensure there's no race condition with playback
+  if (isPlaying) {
+    console.log("Audio still playing - waiting to start recording...");
+    const checkInterval = setInterval(() => {
+      if (!isPlaying) {
+        clearInterval(checkInterval);
+        startRecording(ws);
+      }
+    }, 50);
+    return;
+  }
+
   if (isRecording) {
     console.log(
       "Already recording - waiting for current recording to finish..."
@@ -213,7 +226,6 @@ function startRecording(ws) {
 
   // Clear any existing audio chunks
   responseChunks = [];
-
   isRecording = true;
 
   const tempFile = `${audioDir}/temp_recording.wav`;
@@ -364,17 +376,12 @@ async function playAudioChunk(base64Audio) {
         "-3",
         "vol",
         "5",
-        "pad",
-        "0.5",
-        "0.5",
         "gain",
         "-n",
         "silence",
         "1",
         "0.1",
-        "1%",
-        "delay",
-        "0.5"
+        "1%"
       ]);
 
       // Handle errors on the audio stream
@@ -493,33 +500,41 @@ function endAudioPlayback() {
       return;
     }
 
+    // Set a maximum timeout for waiting for playback to end
+    const timeout = setTimeout(() => {
+      console.log("Forcing audio cleanup due to timeout");
+      cleanupAudio();
+      resolve();
+    }, 200); // Only wait 200ms max before forcing cleanup
+
     if (playbackProcess) {
       // Wait for the playback process to finish naturally
       playbackProcess.once("close", () => {
+        clearTimeout(timeout);
         cleanupAudio();
         resolve();
       });
 
-      // End the process input
+      // End the process input more aggressively
       if (audioStream && !audioStream.destroyed) {
         try {
-          audioStream.end(() => {
-            if (playbackProcess && !playbackProcess.killed) {
-              playbackProcess.stdin.end();
-            }
-          });
+          audioStream.end();
+          playbackProcess.stdin.end();
         } catch (error) {
           if (error.code !== "EPIPE") {
             console.error("Error ending audio stream:", error);
           }
           cleanupAudio();
+          clearTimeout(timeout);
           resolve();
         }
       } else {
         cleanupAudio();
+        clearTimeout(timeout);
         resolve();
       }
     } else {
+      clearTimeout(timeout);
       resolve();
     }
   });
@@ -568,12 +583,24 @@ function handleEvent(message) {
   } else if (serverEvent.type === "response.content_part.done") {
     console.log("Response:", serverEvent.part.transcript);
 
-    // Wait a bit to ensure all chunks are played
-    setTimeout(async () => {
-      await endAudioPlayback();
-      console.log("Playback finished!");
-      startRecording(ws);
-    }, 1000);
+    // Check if audio playback is actually done
+    if (audioBuffer.length === 0 && !isProcessingAudio) {
+      endAudioPlayback().then(() => {
+        console.log("Playback finished!");
+        startRecording(ws);
+      });
+    } else {
+      // If there's still audio playing, set up an event to start recording when done
+      const checkInterval = setInterval(() => {
+        if (audioBuffer.length === 0 && !isProcessingAudio) {
+          clearInterval(checkInterval);
+          endAudioPlayback().then(() => {
+            console.log("Playback finished!");
+            startRecording(ws);
+          });
+        }
+      }, 50); // Check every 50ms instead of waiting a full second
+    }
   }
 }
 
