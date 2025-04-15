@@ -250,7 +250,7 @@ function startRecording(ws) {
 
   let lastSize = 44; // Start after WAV header
 
-  // Check for new data every 100ms
+  // Check for new data every 50ms (reduced from 100ms)
   const checkInterval = setInterval(() => {
     try {
       if (!fs.existsSync(tempFile)) return;
@@ -278,14 +278,12 @@ function startRecording(ws) {
         console.error("Error reading audio data:", error);
       }
     }
-  }, 100);
+  }, 50);
 
   recordingProcess.stderr.on("data", (data) => {
     const info = data.toString().toLowerCase();
     if (info.includes("error") || info.includes("warning")) {
       console.log("Recording debug:", info);
-    } else {
-      console.log("Audio info:", info);
     }
   });
 
@@ -358,11 +356,11 @@ async function playAudioChunk(base64Audio) {
       playbackStartTime = Date.now();
       isPlaying = true;
 
-      // Create WAV header for the stream
-      const header = createWavHeader(1000000); // Use a large enough size
+      // Create WAV header with a larger buffer size (10MB)
+      const header = createWavHeader(10000000);
       audioStream.write(header);
 
-      // Start sox process for streaming playback
+      // Start sox process with improved buffering
       playbackProcess = spawn("sox", [
         "-t",
         "wav",
@@ -376,6 +374,8 @@ async function playAudioChunk(base64Audio) {
         "-3",
         "vol",
         "5",
+        "buffer",
+        "65536", // Increased buffer size
         "gain",
         "-n",
         "silence",
@@ -422,31 +422,41 @@ async function playAudioChunk(base64Audio) {
       });
     }
 
-    // Process all buffered chunks
+    // Process all buffered chunks with improved backpressure handling
     while (audioBuffer.length > 0) {
-      const chunk = audioBuffer.shift();
+      const chunk = audioBuffer[0]; // Peek at the first chunk
+
       if (
-        audioStream &&
-        !audioStream.destroyed &&
-        playbackProcess &&
-        !playbackProcess.killed
+        !audioStream ||
+        audioStream.destroyed ||
+        !playbackProcess ||
+        playbackProcess.killed
       ) {
-        try {
-          const canWrite = audioStream.write(chunk);
-          if (!canWrite) {
-            audioStream.pause();
-            // Put the chunk back in the buffer if we couldn't write it
-            audioBuffer.unshift(chunk);
-            break;
-          }
-        } catch (error) {
-          if (error.code !== "EPIPE") {
-            console.error("Error writing to audio stream:", error);
-          }
-          cleanupAudio();
-          break;
+        break;
+      }
+
+      try {
+        const canWrite = audioStream.write(chunk);
+        if (canWrite) {
+          audioBuffer.shift(); // Only remove if successfully written
+        } else {
+          // Handle backpressure
+          audioStream.pause();
+          // Wait for drain event to resume
+          await new Promise((resolve) => {
+            const drainHandler = () => {
+              audioStream.removeListener("drain", drainHandler);
+              resolve();
+            };
+            audioStream.on("drain", drainHandler);
+          });
+          continue;
         }
-      } else {
+      } catch (error) {
+        if (error.code !== "EPIPE") {
+          console.error("Error writing to audio stream:", error);
+        }
+        cleanupAudio();
         break;
       }
     }
@@ -463,7 +473,11 @@ function cleanupAudio() {
   if (audioStream) {
     try {
       if (!audioStream.destroyed) {
-        audioStream.end();
+        // Ensure all data is flushed before ending
+        if (audioStream.writable) {
+          audioStream.end();
+        }
+        audioStream.destroy();
       }
       audioStream = null;
     } catch (error) {
@@ -477,7 +491,15 @@ function cleanupAudio() {
   if (playbackProcess) {
     try {
       if (!playbackProcess.killed) {
-        playbackProcess.kill();
+        // Try to end the process gracefully first
+        playbackProcess.stdin.end();
+
+        // Give it a moment to end naturally
+        setTimeout(() => {
+          if (!playbackProcess.killed) {
+            playbackProcess.kill();
+          }
+        }, 100);
       }
       playbackProcess = null;
     } catch (error) {
@@ -486,11 +508,14 @@ function cleanupAudio() {
     }
   }
 
+  // Reset all state variables
   totalAudioLength = 0;
   playbackStartTime = 0;
   isPlaying = false;
   audioBuffer = [];
   isProcessingAudio = false;
+
+  console.log("Audio cleanup complete");
 }
 
 function endAudioPlayback() {
@@ -505,7 +530,7 @@ function endAudioPlayback() {
       console.log("Forcing audio cleanup due to timeout");
       cleanupAudio();
       resolve();
-    }, 200); // Only wait 200ms max before forcing cleanup
+    }, 200); // Reduced timeout to 200ms
 
     if (playbackProcess) {
       // Wait for the playback process to finish naturally
