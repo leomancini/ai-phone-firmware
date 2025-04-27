@@ -229,6 +229,13 @@ async def handle_client(websocket: websockets.WebSocketServerProtocol, handset: 
                         # Handle stop event - immediately kill all aplay processes
                         await stop_ringtone(reason="manual_stop")
                         
+                    elif event_type == "open_ai_realtime_client_message":
+                        # Handle client_message event - broadcast to all clients
+                        message_data = {
+                            "data": data.get("message", "")
+                        }
+                        await broadcast_event("ai_realtime_client_message", message_data)
+                        
             except json.JSONDecodeError as e:
                 logger.error(f"Invalid JSON received: {message}")
         
