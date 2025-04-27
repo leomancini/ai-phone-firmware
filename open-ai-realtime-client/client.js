@@ -37,6 +37,7 @@ let isProcessingAudio = false;
 let isResponseComplete = false;
 let lastChunkTime = 0;
 const CHUNK_TIMEOUT = 500; // Time to wait for next chunk before considering response complete
+let handsetState = "down";
 
 // Initialize handset WebSocket connection
 function initHandsetWebSocket() {
@@ -51,21 +52,43 @@ function initHandsetWebSocket() {
       const event = JSON.parse(data.toString());
       console.log("Received handset event:", event);
       if (event.event === "handset_state") {
+        handsetState = event.state;
         if (event.state === "up") {
           console.log("Handset state is up - initializing OpenAI connection");
           initOpenAIWebSocket();
         } else if (event.state === "down") {
           console.log("Handset state is down - stopping current session");
-          // Stop recording and wait a moment to ensure it's stopped
+
+          // Immediately try to kill any recording processes
+          exec("pkill -9 rec", () => {
+            console.log("Killed any existing rec processes");
+          });
+
+          // Stop recording
           stopRecording();
-          setTimeout(() => {
-            // Double check no rec processes are running
-            exec("pkill -9 rec", () => {
-              cleanup(false);
-              ws = null;
-              console.log("Ready for next handset up state");
-            });
-          }, 1000);
+
+          // Wait for recording to stop before proceeding with cleanup
+          const ensureRecordingStopped = async () => {
+            // Try to stop recording again if needed
+            if (isRecording || recordingProcess) {
+              stopRecording();
+              await new Promise((resolve) => setTimeout(resolve, 500));
+              return ensureRecordingStopped();
+            }
+
+            // Once recording is confirmed stopped, clean up audio and session
+            await endAudioPlayback();
+            cleanup(false);
+            ws = null;
+            console.log("Ready for next handset up state");
+          };
+
+          ensureRecordingStopped().catch((error) => {
+            console.error("Error during recording cleanup:", error);
+            // Force cleanup as last resort
+            cleanup(false);
+            ws = null;
+          });
         }
       }
     } catch (error) {
@@ -160,25 +183,45 @@ initHandsetWebSocket();
 
 function stopRecording() {
   if (recordingProcess) {
-    console.log("Forcefully stopping recording process...");
+    console.log("Stopping recording process...");
     try {
-      // Try SIGTERM first
-      recordingProcess.kill("SIGTERM");
+      // Try to kill the process with increasing force
+      const killProcess = () => {
+        try {
+          if (!recordingProcess || recordingProcess.killed) return;
 
-      // Force kill all rec processes
-      exec("pkill -9 rec", (error) => {
-        if (error) {
-          console.error("Error killing rec processes:", error);
-        } else {
-          console.log("Successfully killed all rec processes");
+          // Try SIGTERM first
+          recordingProcess.kill("SIGTERM");
+
+          setTimeout(() => {
+            if (!recordingProcess || recordingProcess.killed) return;
+
+            // If still running, try SIGKILL
+            recordingProcess.kill("SIGKILL");
+
+            setTimeout(() => {
+              if (!recordingProcess || recordingProcess.killed) return;
+
+              // If somehow still running, use pkill as last resort
+              exec("pkill -9 rec", () => {
+                recordingProcess = null;
+                console.log("Used pkill to stop recording process");
+              });
+            }, 100);
+          }, 100);
+        } catch (error) {
+          console.error("Error during process kill:", error);
+          recordingProcess = null;
         }
-      });
+      };
 
-      recordingProcess = null;
+      killProcess();
     } catch (error) {
       console.error("Error stopping recording process:", error);
+      recordingProcess = null;
     }
   }
+
   isRecording = false;
 
   // Emit recording state event
@@ -407,7 +450,7 @@ function startRecording(ws) {
             fs.closeSync(fd);
 
             // Send the new data
-            if (ws.readyState === WebSocket.OPEN) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
               ws.send(
                 JSON.stringify({
                   type: "input_audio_buffer.append",
@@ -540,24 +583,20 @@ function base64EncodeAudio(float32Array) {
 
 async function playAudioChunk(base64Audio) {
   try {
-    // Stop recording before playing audio
-    if (recordingProcess) {
-      recordingProcess.kill("SIGTERM");
-      recordingProcess = null;
-      isRecording = false;
-    }
-
     const audioData = Buffer.from(base64Audio, "base64");
     lastChunkTime = Date.now();
 
-    // Initialize stream and playback process if not already running
-    if (!audioStream || !playbackProcess) {
+    // Ensure clean state before starting new playback
+    if (!audioStream || !playbackProcess || playbackProcess.killed) {
+      // Clean up any existing resources first
+      await endAudioPlayback();
+
       audioStream = new PassThrough();
       playbackStartTime = Date.now();
       isPlaying = true;
 
       // Create WAV header for the stream
-      const header = createWavHeader(10000000);
+      const header = createWavHeader(50000000);
       audioStream.write(header);
 
       // Start sox process for streaming playback
@@ -587,6 +626,11 @@ async function playAudioChunk(base64Audio) {
         "0.5"
       ]);
 
+      // Verify playback process started successfully
+      if (!playbackProcess.pid) {
+        throw new Error("Failed to start playback process");
+      }
+
       // Handle errors on the audio stream
       audioStream.on("error", (error) => {
         if (error.code !== "EPIPE") {
@@ -602,7 +646,14 @@ async function playAudioChunk(base64Audio) {
         cleanupAudio();
       });
 
-      audioStream.pipe(playbackProcess.stdin, { highWaterMark: 1024 * 1024 });
+      // Set up pipe with error handling
+      try {
+        audioStream.pipe(playbackProcess.stdin, { highWaterMark: 1024 * 1024 });
+      } catch (error) {
+        console.error("Error setting up audio pipe:", error);
+        cleanupAudio();
+        return;
+      }
 
       playbackProcess.on("error", (error) => {
         console.error("Playback error:", error);
@@ -619,6 +670,26 @@ async function playAudioChunk(base64Audio) {
         console.log(`Playback process closed with code ${code}`);
         cleanupAudio();
       });
+
+      // Add a watchdog to ensure process is running
+      setTimeout(() => {
+        if (playbackProcess && !playbackProcess.killed && !isPlaying) {
+          console.error("Playback process not playing after initialization");
+          cleanupAudio();
+        }
+      }, 1000);
+    }
+
+    // Verify we have valid stream before writing
+    if (
+      !audioStream ||
+      audioStream.destroyed ||
+      !playbackProcess ||
+      playbackProcess.killed
+    ) {
+      console.error("Invalid playback state, reinitializing...");
+      await endAudioPlayback();
+      return playAudioChunk(base64Audio); // Retry once
     }
 
     // Write chunk immediately
@@ -772,14 +843,6 @@ function handleEvent(message) {
       );
     }
 
-    // Stop recording on first audio chunk to prevent feedback
-    if (recordingProcess) {
-      console.log("Stopping recording...");
-      recordingProcess.kill("SIGTERM");
-      recordingProcess = null;
-      isRecording = false;
-    }
-
     playAudioChunk(serverEvent.delta);
   } else if (serverEvent.type === "response.content_part.done") {
     const responseText = serverEvent.part.transcript;
@@ -808,7 +871,10 @@ function handleEvent(message) {
           console.log("Playback finished!");
           isResponseComplete = false;
           isPlaying = false;
-          startRecording(ws);
+          // Only start recording if handset is up and not already recording
+          if (!isRecording && handsetState === "up") {
+            startRecording(ws);
+          }
         }, 500);
       }
     }, 100);
