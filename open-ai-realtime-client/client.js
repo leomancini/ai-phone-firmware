@@ -15,10 +15,12 @@ if (!fs.existsSync(audioDir)) {
 
 dotenv.config();
 
-const url =
+const OPENAI_URL =
   "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17";
+const HANDSET_URL = "ws://localhost:8765";
 
 let ws = null;
+let handsetWs = null;
 let responseChunks = [];
 let sessionId = null;
 let isRecording = false;
@@ -36,30 +38,170 @@ let isResponseComplete = false;
 let lastChunkTime = 0;
 const CHUNK_TIMEOUT = 500; // Time to wait for next chunk before considering response complete
 
-// Initialize WebSocket connection
-ws = new WebSocket(url, {
-  headers: {
-    Authorization: "Bearer " + process.env.OPENAI_API_KEY,
-    "OpenAI-Beta": "realtime=v1"
+// Initialize handset WebSocket connection
+function initHandsetWebSocket() {
+  handsetWs = new WebSocket(HANDSET_URL);
+
+  handsetWs.on("open", function open() {
+    console.log("Connected to handset state WebSocket");
+  });
+
+  handsetWs.on("message", function message(data) {
+    try {
+      const event = JSON.parse(data.toString());
+      console.log("Received handset event:", event);
+      if (event.event === "handset_state") {
+        if (event.state === "up") {
+          console.log("Handset state is up - initializing OpenAI connection");
+          initOpenAIWebSocket();
+        } else if (event.state === "down") {
+          console.log("Handset state is down - stopping current session");
+          // Stop recording and wait a moment to ensure it's stopped
+          stopRecording();
+          setTimeout(() => {
+            // Double check no rec processes are running
+            exec("pkill -9 rec", () => {
+              cleanup(false);
+              ws = null;
+              console.log("Ready for next handset up state");
+            });
+          }, 1000);
+        }
+      }
+    } catch (error) {
+      console.error("Error parsing handset state message:", error);
+    }
+  });
+
+  handsetWs.on("error", function error(err) {
+    console.error("Handset WebSocket error:", err);
+    // Try to reconnect after a delay
+    setTimeout(initHandsetWebSocket, 5000);
+  });
+
+  handsetWs.on("close", function close() {
+    console.log("Handset WebSocket connection closed");
+    // Try to reconnect after a delay
+    setTimeout(initHandsetWebSocket, 5000);
+  });
+}
+
+// Initialize OpenAI WebSocket connection
+function initOpenAIWebSocket() {
+  if (ws) {
+    console.log("OpenAI WebSocket already connected");
+    return;
   }
-});
 
-// Set up WebSocket event handlers
-ws.on("open", async function open() {
-  console.log("Connected to OpenAI Realtime API");
-  startRecording(ws);
-});
+  // Emit connecting event
+  if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+    handsetWs.send(
+      JSON.stringify({
+        event: "open_ai_realtime_client_message",
+        message: "openai_connecting"
+      })
+    );
+  }
 
-ws.on("message", handleEvent);
-ws.on("error", function error(err) {
-  console.error("WebSocket error:", err);
-  cleanup(false); // Don't exit process, just clean up resources
-});
+  ws = new WebSocket(OPENAI_URL, {
+    headers: {
+      Authorization: "Bearer " + process.env.OPENAI_API_KEY,
+      "OpenAI-Beta": "realtime=v1"
+    }
+  });
 
-ws.on("close", function close() {
-  console.log("WebSocket connection closed");
-  cleanup(false); // Don't exit process, just clean up resources
-});
+  ws.on("open", async function open() {
+    console.log("Connected to OpenAI Realtime API");
+    // Emit connected event
+    if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+      handsetWs.send(
+        JSON.stringify({
+          event: "open_ai_realtime_client_message",
+          message: "openai_connected"
+        })
+      );
+    }
+  });
+
+  ws.on("message", handleEvent);
+  ws.on("error", function error(err) {
+    console.error("WebSocket error:", err);
+    // Emit error event
+    if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+      handsetWs.send(
+        JSON.stringify({
+          event: "open_ai_realtime_client_message",
+          message: "openai_error",
+          error: err.message || "Unknown error"
+        })
+      );
+    }
+    cleanup(false); // Don't exit process, just clean up resources
+  });
+
+  ws.on("close", function close() {
+    console.log("WebSocket connection closed");
+    // Emit disconnected event
+    if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+      handsetWs.send(
+        JSON.stringify({
+          event: "open_ai_realtime_client_message",
+          message: "openai_disconnected"
+        })
+      );
+    }
+    cleanup(false); // Don't exit process, just clean up resources
+  });
+}
+
+// Start by connecting to the handset WebSocket
+console.log("Connecting to handset state WebSocket...");
+initHandsetWebSocket();
+
+function stopRecording() {
+  if (recordingProcess) {
+    console.log("Forcefully stopping recording process...");
+    try {
+      // Try SIGTERM first
+      recordingProcess.kill("SIGTERM");
+
+      // Force kill all rec processes
+      exec("pkill -9 rec", (error) => {
+        if (error) {
+          console.error("Error killing rec processes:", error);
+        } else {
+          console.log("Successfully killed all rec processes");
+        }
+      });
+
+      recordingProcess = null;
+    } catch (error) {
+      console.error("Error stopping recording process:", error);
+    }
+  }
+  isRecording = false;
+
+  // Emit recording state event
+  if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+    handsetWs.send(
+      JSON.stringify({
+        event: "recording_state",
+        state: "stopped"
+      })
+    );
+  }
+
+  // Clean up any temp files that might be left
+  try {
+    const tempFile = `${audioDir}/temp_recording.wav`;
+    if (fs.existsSync(tempFile)) {
+      fs.unlinkSync(tempFile);
+      console.log("Cleaned up temporary recording file");
+    }
+  } catch (error) {
+    console.error("Error cleaning up temp recording file:", error);
+  }
+}
 
 function cleanup(exitAfter = true) {
   if (cleanupInProgress) return;
@@ -67,12 +209,8 @@ function cleanup(exitAfter = true) {
 
   console.log("\nCleaning up...");
 
-  // Stop recording
-  if (recordingProcess) {
-    recordingProcess.kill("SIGTERM");
-    recordingProcess = null;
-    isRecording = false;
-  }
+  // Stop recording with the new function
+  stopRecording();
 
   // Stop playback
   endAudioPlayback();
@@ -85,32 +223,33 @@ function cleanup(exitAfter = true) {
   totalAudioLength = 0;
   playbackStartTime = 0;
 
-  // Close WebSocket connection
+  // Close OpenAI WebSocket connection
   if (ws) {
     try {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "session.end" }));
-        setTimeout(() => {
-          ws.close();
-          ws = null;
-          if (exitAfter) {
-            process.exit(0);
-          }
-        }, 500);
-      } else {
-        ws = null;
-        if (exitAfter) {
-          process.exit(0);
-        }
+        ws.close();
       }
-    } catch (e) {
-      console.error("Error during cleanup:", e);
       ws = null;
-      if (exitAfter) {
-        process.exit(1);
-      }
+    } catch (e) {
+      console.error("Error during OpenAI WebSocket cleanup:", e);
+      ws = null;
     }
-  } else if (exitAfter) {
+  }
+
+  // Close handset WebSocket connection only if we're exiting
+  if (exitAfter && handsetWs) {
+    try {
+      if (handsetWs.readyState === WebSocket.OPEN) {
+        handsetWs.close();
+      }
+      handsetWs = null;
+    } catch (e) {
+      console.error("Error closing handset WebSocket:", e);
+    }
+  }
+
+  if (exitAfter) {
     process.exit(0);
   }
 
@@ -222,6 +361,16 @@ function startRecording(ws) {
 
       isRecording = true;
 
+      // Emit recording state event to all clients
+      if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+        handsetWs.send(
+          JSON.stringify({
+            event: "open_ai_realtime_client_message",
+            message: "recording_started"
+          })
+        );
+      }
+
       const tempFile = `${audioDir}/temp_recording.wav`;
 
       // Record audio continuously to a WAV file with explicit format settings
@@ -294,6 +443,15 @@ function startRecording(ws) {
               recordingProcess = null;
             }
             isRecording = false;
+            // Emit recording stopped event
+            if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+              handsetWs.send(
+                JSON.stringify({
+                  event: "open_ai_realtime_client_message",
+                  message: "recording_stopped"
+                })
+              );
+            }
             setTimeout(() => startRecording(ws), 1000);
           }
         } else {
@@ -306,6 +464,15 @@ function startRecording(ws) {
         clearInterval(checkInterval);
         isRecording = false;
         recordingProcess = null;
+        // Emit recording stopped event
+        if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+          handsetWs.send(
+            JSON.stringify({
+              event: "open_ai_realtime_client_message",
+              message: "recording_stopped"
+            })
+          );
+        }
         try {
           fs.unlinkSync(tempFile);
         } catch (e) {}
@@ -318,6 +485,15 @@ function startRecording(ws) {
         clearInterval(checkInterval);
         isRecording = false;
         recordingProcess = null;
+        // Emit recording stopped event
+        if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+          handsetWs.send(
+            JSON.stringify({
+              event: "open_ai_realtime_client_message",
+              message: "recording_stopped"
+            })
+          );
+        }
         try {
           fs.unlinkSync(tempFile);
         } catch (e) {}
@@ -325,6 +501,15 @@ function startRecording(ws) {
     } catch (error) {
       console.error("Error starting recording:", error);
       isRecording = false;
+      // Emit recording stopped event
+      if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+        handsetWs.send(
+          JSON.stringify({
+            event: "open_ai_realtime_client_message",
+            message: "recording_stopped"
+          })
+        );
+      }
       // Try to restart recording after error
       setTimeout(() => startRecording(ws), 1000);
     }
@@ -559,7 +744,33 @@ function handleEvent(message) {
     console.log("\nStarting recording...");
     startRecording(ws);
   } else if (serverEvent.type === "response.audio.delta") {
-    console.log("Received audio chunk:", serverEvent.delta.length, "bytes");
+    // If this is the first chunk of a new response
+    if (!isPlaying) {
+      console.log("Starting to receive OpenAI response");
+      isPlaying = true;
+      // Emit response started event
+      if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+        handsetWs.send(
+          JSON.stringify({
+            event: "open_ai_realtime_client_message",
+            message: "openai_response_started"
+          })
+        );
+      }
+    }
+
+    const chunkSize = serverEvent.delta.length;
+    console.log("Received audio chunk:", chunkSize, "bytes");
+
+    // Emit chunk received event
+    if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+      handsetWs.send(
+        JSON.stringify({
+          event: "open_ai_realtime_client_message",
+          message: `Received audio chunk: ${chunkSize} bytes`
+        })
+      );
+    }
 
     // Stop recording on first audio chunk to prevent feedback
     if (recordingProcess) {
@@ -571,8 +782,19 @@ function handleEvent(message) {
 
     playAudioChunk(serverEvent.delta);
   } else if (serverEvent.type === "response.content_part.done") {
-    console.log("Response:", serverEvent.part.transcript);
+    const responseText = serverEvent.part.transcript;
+    console.log("Response:", responseText);
     isResponseComplete = true;
+
+    // Emit response message
+    if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+      handsetWs.send(
+        JSON.stringify({
+          event: "open_ai_realtime_client_message",
+          message: `Full response: ${responseText}`
+        })
+      );
+    }
 
     // Start a check for playback completion
     const checkPlaybackComplete = setInterval(() => {
@@ -585,10 +807,38 @@ function handleEvent(message) {
           await endAudioPlayback();
           console.log("Playback finished!");
           isResponseComplete = false;
+          isPlaying = false;
           startRecording(ws);
         }, 500);
       }
     }, 100);
+  } else if (serverEvent.event === "open_ai_realtime_client_message") {
+    // Handle incoming client messages
+    if (serverEvent.message === "recording_started") {
+      console.log(`Client ${serverEvent.sender} started recording`);
+    } else if (serverEvent.message === "recording_stopped") {
+      console.log(`Client ${serverEvent.sender} stopped recording`);
+    } else if (serverEvent.message === "openai_connecting") {
+      console.log(`Client ${serverEvent.sender} is connecting to OpenAI...`);
+    } else if (serverEvent.message === "openai_connected") {
+      console.log(`Client ${serverEvent.sender} connected to OpenAI`);
+    } else if (serverEvent.message === "openai_error") {
+      console.log(
+        `Client ${serverEvent.sender} encountered OpenAI error: ${
+          serverEvent.error || "Unknown error"
+        }`
+      );
+    } else if (serverEvent.message === "openai_disconnected") {
+      console.log(`Client ${serverEvent.sender} disconnected from OpenAI`);
+    } else if (
+      serverEvent.message.startsWith("Received audio chunk:") ||
+      serverEvent.message.startsWith("Response:")
+    ) {
+      // For chunk and response messages, just log them with the sender
+      console.log(`Client ${serverEvent.sender}: ${serverEvent.message}`);
+    } else {
+      console.log(`Message from ${serverEvent.sender}: ${serverEvent.message}`);
+    }
   }
 }
 
