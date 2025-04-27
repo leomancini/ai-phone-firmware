@@ -372,7 +372,7 @@ async function playAudioChunk(base64Audio) {
       isPlaying = true;
 
       // Create WAV header for the stream
-      const header = createWavHeader(2000000);
+      const header = createWavHeader(10000000);
       audioStream.write(header);
 
       // Start sox process for streaming playback
