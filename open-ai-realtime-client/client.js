@@ -32,6 +32,9 @@ let playbackStartTime = 0;
 let isPlaying = false;
 let audioBuffer = [];
 let isProcessingAudio = false;
+let isResponseComplete = false;
+let lastChunkTime = 0;
+const CHUNK_TIMEOUT = 500; // Time to wait for next chunk before considering response complete
 
 // Initialize WebSocket connection
 ws = new WebSocket(url, {
@@ -211,91 +214,121 @@ function startRecording(ws) {
     }
   }
 
-  // Clear any existing audio chunks
-  responseChunks = [];
-
-  isRecording = true;
-
-  const tempFile = `${audioDir}/temp_recording.wav`;
-
-  // Record audio continuously to a WAV file
-  recordingProcess = spawn("rec", [
-    "-t",
-    "alsa",
-    "default", // Use default input device
-    "-t",
-    "wav", // Output format
-    tempFile, // Output file
-    "rate",
-    "24k", // Sample rate
-    "channels",
-    "1", // Mono
-    "trim",
-    "0",
-    "2", // Record in 2-second chunks
-    ":" // Loop recording
-  ]);
-
-  let lastSize = 44; // Start after WAV header
-
-  // Check for new data every 100ms
-  const checkInterval = setInterval(() => {
+  // Add a small delay before starting new recording to let audio device reset
+  setTimeout(() => {
     try {
-      if (!fs.existsSync(tempFile)) return;
+      // Clear any existing audio chunks
+      responseChunks = [];
 
-      const stats = fs.statSync(tempFile);
-      if (stats.size > lastSize) {
-        const fd = fs.openSync(tempFile, "r");
-        const buffer = Buffer.alloc(stats.size - lastSize);
+      isRecording = true;
 
-        fs.readSync(fd, buffer, 0, stats.size - lastSize, lastSize);
-        fs.closeSync(fd);
+      const tempFile = `${audioDir}/temp_recording.wav`;
 
-        // Send the new data
-        ws.send(
-          JSON.stringify({
-            type: "input_audio_buffer.append",
-            audio: buffer.toString("base64")
-          })
-        );
+      // Record audio continuously to a WAV file with explicit format settings
+      recordingProcess = spawn("rec", [
+        "-t",
+        "alsa",
+        "default", // Use default input device
+        "-t",
+        "wav", // Output format
+        tempFile, // Output file
+        "rate",
+        "24k", // Sample rate
+        "channels",
+        "1", // Mono
+        "trim",
+        "0",
+        "2", // Record in 2-second chunks
+        ":" // Loop recording
+      ]);
 
-        lastSize = stats.size;
-      }
+      let lastSize = 44; // Start after WAV header
+
+      // Check for new data every 100ms
+      const checkInterval = setInterval(() => {
+        try {
+          if (!fs.existsSync(tempFile)) return;
+
+          const stats = fs.statSync(tempFile);
+          if (stats.size > lastSize) {
+            const fd = fs.openSync(tempFile, "r");
+            const buffer = Buffer.alloc(stats.size - lastSize);
+
+            fs.readSync(fd, buffer, 0, stats.size - lastSize, lastSize);
+            fs.closeSync(fd);
+
+            // Send the new data
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(
+                JSON.stringify({
+                  type: "input_audio_buffer.append",
+                  audio: buffer.toString("base64")
+                })
+              );
+            }
+
+            lastSize = stats.size;
+          }
+        } catch (error) {
+          if (!error.message.includes("ENOENT")) {
+            console.error("Error reading audio data:", error);
+          }
+        }
+      }, 100);
+
+      recordingProcess.stderr.on("data", (data) => {
+        const info = data.toString().toLowerCase();
+        if (info.includes("error") || info.includes("warning")) {
+          console.error("Recording error/warning:", info);
+          // If we get a critical error, try to restart recording
+          if (
+            info.includes("can't encode") ||
+            info.includes("not applicable")
+          ) {
+            console.log(
+              "Critical recording error detected, attempting to restart..."
+            );
+            clearInterval(checkInterval);
+            if (recordingProcess) {
+              recordingProcess.kill("SIGTERM");
+              recordingProcess = null;
+            }
+            isRecording = false;
+            setTimeout(() => startRecording(ws), 1000);
+          }
+        } else {
+          console.log("Audio info:", info);
+        }
+      });
+
+      recordingProcess.on("error", (error) => {
+        console.error("Recording process error:", error);
+        clearInterval(checkInterval);
+        isRecording = false;
+        recordingProcess = null;
+        try {
+          fs.unlinkSync(tempFile);
+        } catch (e) {}
+        // Try to restart recording after error
+        setTimeout(() => startRecording(ws), 1000);
+      });
+
+      recordingProcess.on("close", (code) => {
+        console.log("Recording stopped with code:", code);
+        clearInterval(checkInterval);
+        isRecording = false;
+        recordingProcess = null;
+        try {
+          fs.unlinkSync(tempFile);
+        } catch (e) {}
+      });
     } catch (error) {
-      if (!error.message.includes("ENOENT")) {
-        console.error("Error reading audio data:", error);
-      }
+      console.error("Error starting recording:", error);
+      isRecording = false;
+      // Try to restart recording after error
+      setTimeout(() => startRecording(ws), 1000);
     }
-  }, 100);
-
-  recordingProcess.stderr.on("data", (data) => {
-    const info = data.toString().toLowerCase();
-    if (info.includes("error") || info.includes("warning")) {
-      console.log("Recording debug:", info);
-    } else {
-      console.log("Audio info:", info);
-    }
-  });
-
-  recordingProcess.on("error", (error) => {
-    console.error("Recording process error:", error);
-    clearInterval(checkInterval);
-    isRecording = false;
-    recordingProcess = null;
-    try {
-      fs.unlinkSync(tempFile);
-    } catch (e) {}
-  });
-
-  recordingProcess.on("close", () => {
-    console.log("Recording stopped");
-    clearInterval(checkInterval);
-    isRecording = false;
-    recordingProcess = null;
-    try {
-      fs.unlinkSync(tempFile);
-    } catch (e) {}
-  });
+  }, 500); // Add 500ms delay before starting new recording
 }
 
 function floatTo16BitPCM(float32Array) {
@@ -330,15 +363,7 @@ async function playAudioChunk(base64Audio) {
     }
 
     const audioData = Buffer.from(base64Audio, "base64");
-    totalAudioLength += audioData.length;
-    audioBuffer.push(audioData);
-
-    // If we're already processing audio, just add to buffer
-    if (isProcessingAudio) {
-      return;
-    }
-
-    isProcessingAudio = true;
+    lastChunkTime = Date.now();
 
     // Initialize stream and playback process if not already running
     if (!audioStream || !playbackProcess) {
@@ -347,17 +372,17 @@ async function playAudioChunk(base64Audio) {
       isPlaying = true;
 
       // Create WAV header for the stream
-      const header = createWavHeader(1000000); // Use a large enough size
+      const header = createWavHeader(2000000);
       audioStream.write(header);
 
       // Start sox process for streaming playback
       playbackProcess = spawn("sox", [
         "-t",
         "wav",
-        "-", // Read from stdin
+        "-",
         "-t",
         "alsa",
-        "plughw:3,0", // Output device
+        "plughw:3,0",
         "rate",
         "24k",
         "norm",
@@ -385,7 +410,6 @@ async function playAudioChunk(base64Audio) {
         cleanupAudio();
       });
 
-      // Handle errors on the playback process stdin
       playbackProcess.stdin.on("error", (error) => {
         if (error.code !== "EPIPE") {
           console.error("Playback stdin error:", error);
@@ -393,16 +417,13 @@ async function playAudioChunk(base64Audio) {
         cleanupAudio();
       });
 
-      // Pipe audio stream to sox
-      audioStream.pipe(playbackProcess.stdin);
+      audioStream.pipe(playbackProcess.stdin, { highWaterMark: 1024 * 1024 });
 
-      // Handle playback process events
       playbackProcess.on("error", (error) => {
         console.error("Playback error:", error);
         cleanupAudio();
       });
 
-      // Wait for the stream to be ready before writing data
       playbackProcess.stdin.on("drain", () => {
         if (audioStream && !audioStream.destroyed) {
           audioStream.resume();
@@ -415,40 +436,24 @@ async function playAudioChunk(base64Audio) {
       });
     }
 
-    // Process all buffered chunks
-    while (audioBuffer.length > 0) {
-      const chunk = audioBuffer.shift();
-      if (
-        audioStream &&
-        !audioStream.destroyed &&
-        playbackProcess &&
-        !playbackProcess.killed
-      ) {
-        try {
-          const canWrite = audioStream.write(chunk);
-          if (!canWrite) {
-            audioStream.pause();
-            // Put the chunk back in the buffer if we couldn't write it
-            audioBuffer.unshift(chunk);
-            break;
-          }
-        } catch (error) {
-          if (error.code !== "EPIPE") {
-            console.error("Error writing to audio stream:", error);
-          }
-          cleanupAudio();
-          break;
-        }
-      } else {
-        break;
+    // Write chunk immediately
+    try {
+      const canWrite = audioStream.write(audioData);
+      if (!canWrite) {
+        await new Promise((resolve) =>
+          playbackProcess.stdin.once("drain", resolve)
+        );
+        audioStream.resume();
       }
+    } catch (error) {
+      if (error.code !== "EPIPE") {
+        console.error("Error writing to audio stream:", error);
+      }
+      cleanupAudio();
     }
-
-    isProcessingAudio = false;
   } catch (error) {
     console.error("Error playing audio chunk:", error);
     cleanupAudio();
-    isProcessingAudio = false;
   }
 }
 
@@ -531,8 +536,9 @@ function handleEvent(message) {
   if (serverEvent.type === "session.created") {
     sessionId = serverEvent.session;
     console.log("Session created:", sessionId);
+    isResponseComplete = false;
+    lastChunkTime = 0;
 
-    // Configure session with semantic VAD
     ws.send(
       JSON.stringify({
         type: "session.update",
@@ -556,24 +562,33 @@ function handleEvent(message) {
     console.log("Received audio chunk:", serverEvent.delta.length, "bytes");
 
     // Stop recording on first audio chunk to prevent feedback
-    if (recordingProcess && responseChunks.length === 0) {
+    if (recordingProcess) {
       console.log("Stopping recording...");
       recordingProcess.kill("SIGTERM");
       recordingProcess = null;
       isRecording = false;
     }
 
-    responseChunks.push(serverEvent.delta);
     playAudioChunk(serverEvent.delta);
   } else if (serverEvent.type === "response.content_part.done") {
     console.log("Response:", serverEvent.part.transcript);
+    isResponseComplete = true;
 
-    // Wait a bit to ensure all chunks are played
-    setTimeout(async () => {
-      await endAudioPlayback();
-      console.log("Playback finished!");
-      startRecording(ws);
-    }, 1000);
+    // Start a check for playback completion
+    const checkPlaybackComplete = setInterval(() => {
+      // Consider playback complete if no new chunks received for CHUNK_TIMEOUT ms
+      if (Date.now() - lastChunkTime > CHUNK_TIMEOUT) {
+        clearInterval(checkPlaybackComplete);
+
+        // Add a small delay to ensure last chunk is fully played
+        setTimeout(async () => {
+          await endAudioPlayback();
+          console.log("Playback finished!");
+          isResponseComplete = false;
+          startRecording(ws);
+        }, 500);
+      }
+    }, 100);
   }
 }
 
