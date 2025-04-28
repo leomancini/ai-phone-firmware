@@ -13,9 +13,9 @@ if (!fs.existsSync(audioDir)) {
 
 dotenv.config();
 
-const OPENAI_URL =
+const OPENAI_REALTIME_SOCKET_SERVER =
   "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17";
-const HANDSET_URL = "ws://localhost:8765";
+const HARDWARE_SOCKET_SERVER = "ws://localhost:8765";
 
 let ws = null;
 let handsetWs = null;
@@ -39,7 +39,7 @@ let handsetState = "down";
 
 // Initialize handset WebSocket connection
 function initHandsetWebSocket() {
-  handsetWs = new WebSocket(HANDSET_URL);
+  handsetWs = new WebSocket(HARDWARE_SOCKET_SERVER);
 
   handsetWs.on("open", function open() {
     console.log("Connected to handset state WebSocket");
@@ -126,7 +126,7 @@ function initOpenAIWebSocket() {
     );
   }
 
-  ws = new WebSocket(OPENAI_URL, {
+  ws = new WebSocket(OPENAI_REALTIME_SOCKET_SERVER, {
     headers: {
       Authorization: "Bearer " + process.env.OPENAI_API_KEY,
       "OpenAI-Beta": "realtime=v1"
