@@ -1,5 +1,3 @@
-// TODO: Handle longer audio responses without cutting off the response
-
 import WebSocket from "ws";
 import fs from "fs";
 import { exec, spawn } from "child_process";
