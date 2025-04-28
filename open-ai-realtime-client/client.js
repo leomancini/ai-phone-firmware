@@ -340,45 +340,6 @@ function createWavHeader(dataLength) {
   return Buffer.from(buffer);
 }
 
-function saveAndPlayAudio(base64Audio) {
-  try {
-    const audioData = Buffer.from(base64Audio, "base64");
-    console.log("Raw audio data length:", audioData.length, "bytes");
-
-    if (audioData.length === 0) {
-      console.error("Error: Received empty audio data");
-      return;
-    }
-
-    const header = createWavHeader(audioData.length);
-    const wavFile = Buffer.concat([header, audioData]);
-
-    const audioDir = "./saved_audio";
-    if (!fs.existsSync(audioDir)) {
-      fs.mkdirSync(audioDir);
-    }
-
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const outputFile = `${audioDir}/response_${timestamp}.wav`;
-    fs.writeFileSync(outputFile, wavFile);
-    console.log(`Saved response to ${outputFile}`);
-
-    console.log("Playing response...");
-    exec(
-      `sox "${outputFile}" -t alsa plughw:3,0 rate 24000 norm -3 vol 8`,
-      (error, stdout, stderr) => {
-        if (error) {
-          console.error("Error playing response:", error);
-        }
-        console.log("\nStarting next recording...");
-        startRecording(ws);
-      }
-    );
-  } catch (error) {
-    console.error("Error processing response:", error);
-  }
-}
-
 function startRecording(ws) {
   console.log("Starting recording...");
   if (isRecording) {
