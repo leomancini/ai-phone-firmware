@@ -6,9 +6,15 @@ import dotenv from "dotenv";
 import { PassThrough } from "stream";
 import path from "path";
 
-const audioDir = "./saved_audio";
-if (!fs.existsSync(audioDir)) {
-  fs.mkdirSync(audioDir);
+const audioDirectory = "./audio";
+const tempAudioDirectory = audioDirectory + "/temp";
+
+if (!fs.existsSync(audioDirectory)) {
+  fs.mkdirSync(audioDirectory);
+}
+
+if (!fs.existsSync(tempAudioDirectory)) {
+  fs.mkdirSync(tempAudioDirectory);
 }
 
 dotenv.config();
@@ -37,7 +43,38 @@ let lastChunkTime = 0;
 let chunkTimeout = 500;
 let handsetState = "down";
 
-// Initialize handset WebSocket connection
+function playWelcomeAudio() {
+  return new Promise((resolve, reject) => {
+    console.log("Waiting to play welcome audio...");
+    // Add  delay before playing
+    setTimeout(() => {
+      console.log("Playing welcome audio...");
+      const welcomeProcess = spawn("sox", [
+        audioDirectory + "/alloy-welcome.wav",
+        "-t",
+        "alsa",
+        "plughw:3,0",
+        "rate",
+        "24k",
+        "norm",
+        "-3",
+        "vol",
+        "5"
+      ]);
+
+      welcomeProcess.on("error", (error) => {
+        console.error("Error playing welcome audio:", error);
+        resolve(); // Resolve anyway to continue with normal flow
+      });
+
+      welcomeProcess.on("close", (code) => {
+        console.log("Welcome audio finished with code:", code);
+        resolve();
+      });
+    }, 1000);
+  });
+}
+
 function initHandsetWebSocket() {
   handsetWs = new WebSocket(HARDWARE_SOCKET_SERVER);
 
@@ -109,7 +146,6 @@ function initHandsetWebSocket() {
   });
 }
 
-// Initialize OpenAI WebSocket connection
 function initOpenAIWebSocket() {
   if (ws) {
     console.log("OpenAI WebSocket already connected");
@@ -177,10 +213,6 @@ function initOpenAIWebSocket() {
   });
 }
 
-// Start by connecting to the handset WebSocket
-console.log("Connecting to handset state WebSocket...");
-initHandsetWebSocket();
-
 function stopRecording() {
   if (recordingProcess) {
     console.log("Stopping recording process...");
@@ -236,7 +268,7 @@ function stopRecording() {
 
   // Clean up any temp files that might be left
   try {
-    const tempFile = `${audioDir}/temp_recording.wav`;
+    const tempFile = `${tempAudioDirectory}/recording.wav`;
     if (fs.existsSync(tempFile)) {
       fs.unlinkSync(tempFile);
       console.log("Cleaned up temporary recording file");
@@ -375,7 +407,7 @@ function startRecording(ws) {
         );
       }
 
-      const tempFile = `${audioDir}/temp_recording.wav`;
+      const tempFile = `${tempAudioDirectory}/recording.wav`;
 
       // Record audio continuously to a WAV file with explicit format settings
       recordingProcess = spawn("rec", [
@@ -869,40 +901,11 @@ function handleEvent(message) {
   }
 }
 
+console.log("Starting up...");
+initHandsetWebSocket();
+
 // Add SIGTERM handler
 process.on("SIGTERM", () => {
   console.log("Received SIGTERM - Cleaning up...");
   cleanup(true);
 });
-
-function playWelcomeAudio() {
-  return new Promise((resolve, reject) => {
-    console.log("Waiting to play welcome audio...");
-    // Add  delay before playing
-    setTimeout(() => {
-      console.log("Playing welcome audio...");
-      const welcomeProcess = spawn("sox", [
-        "./audio/alloy-welcome.wav",
-        "-t",
-        "alsa",
-        "plughw:3,0",
-        "rate",
-        "24k",
-        "norm",
-        "-3",
-        "vol",
-        "5"
-      ]);
-
-      welcomeProcess.on("error", (error) => {
-        console.error("Error playing welcome audio:", error);
-        resolve(); // Resolve anyway to continue with normal flow
-      });
-
-      welcomeProcess.on("close", (code) => {
-        console.log("Welcome audio finished with code:", code);
-        resolve();
-      });
-    }, 1000);
-  });
-}
