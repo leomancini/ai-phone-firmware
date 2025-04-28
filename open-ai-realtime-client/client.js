@@ -54,11 +54,10 @@ function initHandsetWebSocket() {
       if (event.event === "handset_state") {
         handsetState = event.state;
         if (event.state === "up") {
-          console.log("Handset state is up - playing welcome audio");
-          playWelcomeAudio().then(() => {
-            console.log("Handset state is up - initializing OpenAI connection");
-            initOpenAIWebSocket();
-          });
+          console.log("Playing welcome audio");
+          playWelcomeAudio();
+          console.log("Initializing OpenAI connection");
+          initOpenAIWebSocket();
         } else if (event.state === "down") {
           console.log("Handset state is down - stopping current session");
 
