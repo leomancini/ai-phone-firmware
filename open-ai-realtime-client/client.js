@@ -54,8 +54,11 @@ function initHandsetWebSocket() {
       if (event.event === "handset_state") {
         handsetState = event.state;
         if (event.state === "up") {
-          console.log("Handset state is up - initializing OpenAI connection");
-          initOpenAIWebSocket();
+          console.log("Handset state is up - playing welcome audio");
+          playWelcomeAudio().then(() => {
+            console.log("Handset state is up - initializing OpenAI connection");
+            initOpenAIWebSocket();
+          });
         } else if (event.state === "down") {
           console.log("Handset state is down - stopping current session");
 
@@ -913,3 +916,35 @@ process.on("SIGTERM", () => {
   console.log("Received SIGTERM - Cleaning up...");
   cleanup(true);
 });
+
+function playWelcomeAudio() {
+  return new Promise((resolve, reject) => {
+    console.log("Waiting to play welcome audio...");
+    // Add  delay before playing
+    setTimeout(() => {
+      console.log("Playing welcome audio...");
+      const welcomeProcess = spawn("sox", [
+        "./audio/alloy-welcome.wav",
+        "-t",
+        "alsa",
+        "plughw:3,0",
+        "rate",
+        "24k",
+        "norm",
+        "-3",
+        "vol",
+        "5"
+      ]);
+
+      welcomeProcess.on("error", (error) => {
+        console.error("Error playing welcome audio:", error);
+        resolve(); // Resolve anyway to continue with normal flow
+      });
+
+      welcomeProcess.on("close", (code) => {
+        console.log("Welcome audio finished with code:", code);
+        resolve();
+      });
+    }, 1000);
+  });
+}
