@@ -34,7 +34,7 @@ let audioBuffer = [];
 let isProcessingAudio = false;
 let isResponseComplete = false;
 let lastChunkTime = 0;
-const CHUNK_TIMEOUT = 500; // Time to wait for next chunk before considering response complete
+let chunkTimeout = 500;
 let handsetState = "down";
 
 // Initialize handset WebSocket connection
@@ -822,8 +822,8 @@ function handleEvent(message) {
 
     // Start a check for playback completion
     const checkPlaybackComplete = setInterval(() => {
-      // Consider playback complete if no new chunks received for CHUNK_TIMEOUT ms
-      if (Date.now() - lastChunkTime > CHUNK_TIMEOUT) {
+      // Consider playback complete if no new chunks received for chunkTimeout ms
+      if (Date.now() - lastChunkTime > chunkTimeout) {
         clearInterval(checkPlaybackComplete);
 
         // Add a small delay to ensure last chunk is fully played
