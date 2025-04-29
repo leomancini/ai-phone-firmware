@@ -71,7 +71,7 @@ function playWelcomeAudio() {
         console.log("Welcome audio finished with code:", code);
         resolve();
       });
-    }, 1000);
+    }, 500);
   });
 }
 
