@@ -20,7 +20,7 @@ if (!fs.existsSync(tempAudioDirectory)) {
 dotenv.config();
 
 const OPENAI_REALTIME_SOCKET_SERVER =
-  "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17";
+  "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview";
 const HARDWARE_SOCKET_SERVER = "ws://localhost:8765";
 
 let ws = null;
@@ -71,7 +71,7 @@ function playWelcomeAudio() {
         console.log("Welcome audio finished with code:", code);
         resolve();
       });
-    }, 500);
+    }, 1000);
   });
 }
 
