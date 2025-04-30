@@ -275,6 +275,9 @@ async def main():
     
     async with websockets.serve(handler, "0.0.0.0", 8765):
         logger.info(f"Server ready at ws://{local_ip}:8765")
+        # Turn on LED to indicate server is running
+        led.on()
+        await broadcast_event("led_state", {"state": "on"})
         await asyncio.Future()
 
 if __name__ == "__main__":
