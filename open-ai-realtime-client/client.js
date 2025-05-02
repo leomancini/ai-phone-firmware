@@ -66,7 +66,7 @@ function playWelcomeAudio() {
         handsetWs.send(
           JSON.stringify({
             event: "open_ai_realtime_client_message",
-            message: "played_welcome_message"
+            message: "playing_welcome_message"
           })
         );
       }
