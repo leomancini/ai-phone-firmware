@@ -42,6 +42,7 @@ let isResponseComplete = false;
 let lastChunkTime = 0;
 let chunkTimeout = 500;
 let handsetState = "down";
+let ledOffTimer = null;
 
 function playWelcomeAudio() {
   return new Promise((resolve, reject) => {
@@ -62,15 +63,6 @@ function playWelcomeAudio() {
         "5"
       ]);
 
-      if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
-        handsetWs.send(
-          JSON.stringify({
-            event: "open_ai_realtime_client_message",
-            message: "playing_welcome_message"
-          })
-        );
-      }
-
       welcomeProcess.on("error", (error) => {
         console.error("Error playing welcome audio:", error);
         resolve(); // Resolve anyway to continue with normal flow
@@ -78,6 +70,17 @@ function playWelcomeAudio() {
 
       welcomeProcess.on("close", (code) => {
         console.log("Welcome audio finished with code:", code);
+
+        if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+          handsetWs.send(
+            JSON.stringify({
+              event: "open_ai_realtime_client_message",
+              message: "playing_welcome_message"
+            })
+          );
+          handsetWs.send(JSON.stringify({ event: "led_on" }));
+        }
+
         resolve();
       });
     }, 1000);
@@ -98,6 +101,7 @@ function initHandsetWebSocket() {
       if (event.event === "handset_state") {
         handsetState = event.state;
         if (event.state === "up") {
+          handsetWs.send(JSON.stringify({ event: "led_off" }));
           console.log("Playing welcome audio");
           playWelcomeAudio();
           console.log("Initializing OpenAI connection");
@@ -845,16 +849,26 @@ function handleEvent(message) {
           message: `Received audio chunk: ${chunkSize} bytes`
         })
       );
+      // Blink the LED for each chunk
+      handsetWs.send(JSON.stringify({ event: "led_on" }));
+      if (ledOffTimer) clearTimeout(ledOffTimer);
+      ledOffTimer = setTimeout(() => {
+        if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+          handsetWs.send(JSON.stringify({ event: "led_off" }));
+        }
+      }, 50);
     }
 
     playAudioChunk(serverEvent.delta);
   } else if (serverEvent.type === "response.content_part.done") {
     const responseText = serverEvent.part.transcript;
     console.log("Response:", responseText);
-    isResponseComplete = true;
 
-    // Emit response message
+    isResponseComplete = true;
     if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+      if (ledOffTimer) clearTimeout(ledOffTimer);
+      ledOffTimer = null;
+      handsetWs.send(JSON.stringify({ event: "led_on" }));
       handsetWs.send(
         JSON.stringify({
           event: "open_ai_realtime_client_message",
@@ -879,7 +893,7 @@ function handleEvent(message) {
           if (!isRecording && handsetState === "up") {
             startRecording(ws);
           }
-        }, 500);
+        }, 1000);
       }
     }, 100);
   } else if (serverEvent.event === "open_ai_realtime_client_message") {
@@ -914,6 +928,12 @@ function handleEvent(message) {
 
 console.log("Starting up...");
 initHandsetWebSocket();
+// Emit led_on event when script is ready
+setTimeout(() => {
+  if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+    handsetWs.send(JSON.stringify({ event: "led_on" }));
+  }
+}, 1000);
 
 // Add SIGTERM handler
 process.on("SIGTERM", () => {
