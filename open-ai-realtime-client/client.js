@@ -603,6 +603,8 @@ async function playAudioChunk(base64Audio) {
 
       // Start sox process for streaming playback
       playbackProcess = spawn("sox", [
+        "--buffer",
+        "512",
         "-t",
         "wav",
         "-",
