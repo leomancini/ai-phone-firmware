@@ -62,6 +62,15 @@ function playWelcomeAudio() {
         "5"
       ]);
 
+      if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+        handsetWs.send(
+          JSON.stringify({
+            event: "open_ai_realtime_client_message",
+            message: "played_welcome_message"
+          })
+        );
+      }
+
       welcomeProcess.on("error", (error) => {
         console.error("Error playing welcome audio:", error);
         resolve(); // Resolve anyway to continue with normal flow
