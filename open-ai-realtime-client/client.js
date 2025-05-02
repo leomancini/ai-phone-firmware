@@ -50,6 +50,12 @@ function playWelcomeAudio() {
     // Add  delay before playing
     setTimeout(() => {
       console.log("Playing welcome audio...");
+      handsetWs.send(
+        JSON.stringify({
+          event: "open_ai_realtime_client_message",
+          message: "started_playing_welcome_message"
+        })
+      );
       const welcomeProcess = spawn("sox", [
         audioDirectory + "/alloy-welcome.wav",
         "-t",
@@ -75,7 +81,7 @@ function playWelcomeAudio() {
           handsetWs.send(
             JSON.stringify({
               event: "open_ai_realtime_client_message",
-              message: "playing_welcome_message"
+              message: "finished_playing_welcome_message"
             })
           );
           handsetWs.send(JSON.stringify({ event: "led_on" }));
