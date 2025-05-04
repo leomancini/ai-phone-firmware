@@ -84,7 +84,7 @@ function playWelcomeAudio() {
               message: "finished_playing_welcome_message"
             })
           );
-          handsetWs.send(JSON.stringify({ event: "led_on" }));
+          handsetWs.send(JSON.stringify({ event: "led_off" }));
         }
 
         resolve();
@@ -107,13 +107,16 @@ function initHandsetWebSocket() {
       if (event.event === "handset_state") {
         handsetState = event.state;
         if (event.state === "up") {
-          handsetWs.send(JSON.stringify({ event: "led_off" }));
           console.log("Playing welcome audio");
           playWelcomeAudio();
           console.log("Initializing OpenAI connection");
           initOpenAIWebSocket();
         } else if (event.state === "down") {
           console.log("Handset state is down - stopping current session");
+
+          if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+            handsetWs.send(JSON.stringify({ event: "led_on" }));
+          }
 
           // Immediately try to kill any recording processes
           exec("pkill -9 rec", () => {
@@ -818,7 +821,7 @@ function handleEvent(message) {
           input_audio_format: "pcm16",
           turn_detection: {
             type: "semantic_vad",
-            eagerness: "medium",
+            eagerness: "high",
             create_response: true,
             interrupt_response: true
           }
@@ -828,6 +831,26 @@ function handleEvent(message) {
 
     console.log("\nStarting recording...");
     startRecording(ws);
+  } else if (serverEvent.type === "input_audio_buffer.speech_started") {
+    console.log("User input started");
+    if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+      handsetWs.send(
+        JSON.stringify({
+          event: "open_ai_realtime_client_message",
+          message: "user_input_started"
+        })
+      );
+    }
+  } else if (serverEvent.type === "input_audio_buffer.speech_stopped") {
+    console.log("User input stopped");
+    if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+      handsetWs.send(
+        JSON.stringify({
+          event: "open_ai_realtime_client_message",
+          message: "user_input_stopped"
+        })
+      );
+    }
   } else if (serverEvent.type === "response.audio.delta") {
     // If this is the first chunk of a new response
     if (!isPlaying) {
@@ -835,6 +858,7 @@ function handleEvent(message) {
       isPlaying = true;
       // Emit response started event
       if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+        handsetWs.send(JSON.stringify({ event: "led_off" }));
         handsetWs.send(
           JSON.stringify({
             event: "open_ai_realtime_client_message",
@@ -874,7 +898,6 @@ function handleEvent(message) {
     if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
       if (ledOffTimer) clearTimeout(ledOffTimer);
       ledOffTimer = null;
-      handsetWs.send(JSON.stringify({ event: "led_on" }));
       handsetWs.send(
         JSON.stringify({
           event: "open_ai_realtime_client_message",
@@ -893,6 +916,9 @@ function handleEvent(message) {
         setTimeout(async () => {
           await endAudioPlayback();
           console.log("Playback finished!");
+          if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+            handsetWs.send(JSON.stringify({ event: "led_off" }));
+          }
           isResponseComplete = false;
           isPlaying = false;
           // Only start recording if handset is up and not already recording
@@ -902,33 +928,6 @@ function handleEvent(message) {
         }, 1000);
       }
     }, 100);
-  } else if (serverEvent.event === "open_ai_realtime_client_message") {
-    // Handle incoming client messages
-    if (serverEvent.message === "recording_started") {
-      console.log(`Client ${serverEvent.sender} started recording`);
-    } else if (serverEvent.message === "recording_stopped") {
-      console.log(`Client ${serverEvent.sender} stopped recording`);
-    } else if (serverEvent.message === "openai_connecting") {
-      console.log(`Client ${serverEvent.sender} is connecting to OpenAI...`);
-    } else if (serverEvent.message === "openai_connected") {
-      console.log(`Client ${serverEvent.sender} connected to OpenAI`);
-    } else if (serverEvent.message === "openai_error") {
-      console.log(
-        `Client ${serverEvent.sender} encountered OpenAI error: ${
-          serverEvent.error || "Unknown error"
-        }`
-      );
-    } else if (serverEvent.message === "openai_disconnected") {
-      console.log(`Client ${serverEvent.sender} disconnected from OpenAI`);
-    } else if (
-      serverEvent.message.startsWith("Received audio chunk:") ||
-      serverEvent.message.startsWith("Response:")
-    ) {
-      // For chunk and response messages, just log them with the sender
-      console.log(`Client ${serverEvent.sender}: ${serverEvent.message}`);
-    } else {
-      console.log(`Message from ${serverEvent.sender}: ${serverEvent.message}`);
-    }
   }
 }
 
