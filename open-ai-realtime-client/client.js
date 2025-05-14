@@ -43,16 +43,20 @@ let lastChunkTime = 0;
 let chunkTimeout = 500;
 let handsetState = "down";
 let ledOffTimer = null;
+let ledSafetyCheckInterval = null;
 
 function playWelcomeAudio() {
   return new Promise((resolve, reject) => {
     setTimeout(() => {
-      handsetWs.send(
-        JSON.stringify({
-          event: "open_ai_realtime_client_message",
-          message: "started_playing_welcome_message"
-        })
-      );
+      if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+        handsetWs.send(
+          JSON.stringify({
+            event: "open_ai_realtime_client_message",
+            message: "Started playing welcome message"
+          })
+        );
+      }
+
       const welcomeProcess = spawn("sox", [
         audioDirectory + "/alloy-welcome.wav",
         "-q",
@@ -77,12 +81,15 @@ function playWelcomeAudio() {
           handsetWs.send(
             JSON.stringify({
               event: "open_ai_realtime_client_message",
-              message: "finished_playing_welcome_message"
+              message: "Finished playing welcome message"
             })
           );
 
           if (handsetState === "up") {
             handsetWs.send(JSON.stringify({ event: "led_off" }));
+            setTimeout(() => {
+              handsetWs.send(JSON.stringify({ event: "led_on" }));
+            }, 200);
           }
         }
 
@@ -101,11 +108,47 @@ function initHandsetWebSocket() {
       if (event.event === "handset_state") {
         handsetState = event.state;
         if (event.state === "up") {
+          if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+            if (handsetState === "up") {
+              handsetWs.send(JSON.stringify({ event: "led_off" }));
+              setTimeout(() => {
+                handsetWs.send(JSON.stringify({ event: "led_on" }));
+              }, 200);
+            }
+          }
+
+          // Set up safety interval to prevent LED from getting stuck off
+          if (ledSafetyCheckInterval) {
+            clearInterval(ledSafetyCheckInterval);
+          }
+
+          ledSafetyCheckInterval = setInterval(() => {
+            if (
+              handsetState === "up" &&
+              handsetWs &&
+              handsetWs.readyState === WebSocket.OPEN
+            ) {
+              handsetWs.send(JSON.stringify({ event: "led_on" }));
+            }
+          }, 5000);
+
           playWelcomeAudio();
           initOpenAIWebSocket();
         } else if (event.state === "down") {
+          // Clear safety interval when handset is down
+          if (ledSafetyCheckInterval) {
+            clearInterval(ledSafetyCheckInterval);
+            ledSafetyCheckInterval = null;
+          }
+
           if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
             handsetWs.send(JSON.stringify({ event: "led_on" }));
+            handsetWs.send(
+              JSON.stringify({
+                event: "open_ai_realtime_client_message",
+                message: "Handset down"
+              })
+            );
           }
 
           exec("pkill -9 rec");
@@ -118,8 +161,47 @@ function initHandsetWebSocket() {
               return ensureRecordingStopped();
             }
 
-            await endAudioPlayback();
-            cleanup(false);
+            // When handset is down, immediately kill audio playback
+            if (playbackProcess && !playbackProcess.killed) {
+              if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+                handsetWs.send(
+                  JSON.stringify({
+                    event: "open_ai_realtime_client_message",
+                    message: "Stopping audio playback because handset is down"
+                  })
+                );
+              }
+
+              // Immediately kill the playback process
+              try {
+                playbackProcess.kill("SIGKILL");
+              } catch (err) {
+                console.error("Error killing playback process:", err);
+              }
+              playbackProcess = null;
+            }
+
+            if (audioStream && !audioStream.destroyed) {
+              try {
+                audioStream.destroy();
+              } catch (err) {
+                console.error("Error destroying audio stream:", err);
+              }
+              audioStream = null;
+            }
+
+            isPlaying = false;
+
+            // Clean up the connection to OpenAI
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              try {
+                ws.send(JSON.stringify({ type: "session.end" }));
+                ws.close();
+              } catch (e) {
+                console.error("Error closing OpenAI session:", e);
+              }
+            }
+
             ws = null;
           };
 
@@ -154,7 +236,7 @@ function initOpenAIWebSocket() {
     handsetWs.send(
       JSON.stringify({
         event: "open_ai_realtime_client_message",
-        message: "openai_connecting"
+        message: "Connecting to OpenAI"
       })
     );
   }
@@ -171,7 +253,7 @@ function initOpenAIWebSocket() {
       handsetWs.send(
         JSON.stringify({
           event: "open_ai_realtime_client_message",
-          message: "openai_connected"
+          message: "Connected to OpenAI"
         })
       );
     }
@@ -184,7 +266,7 @@ function initOpenAIWebSocket() {
       handsetWs.send(
         JSON.stringify({
           event: "open_ai_realtime_client_message",
-          message: "openai_error",
+          message: "OpenAI error",
           error: err.message || "Unknown error"
         })
       );
@@ -197,7 +279,7 @@ function initOpenAIWebSocket() {
       handsetWs.send(
         JSON.stringify({
           event: "open_ai_realtime_client_message",
-          message: "openai_disconnected"
+          message: "Disconnected from OpenAI"
         })
       );
     }
@@ -266,7 +348,31 @@ function cleanup(exitAfter = true) {
   cleanupInProgress = true;
 
   stopRecording();
-  endAudioPlayback();
+
+  // Clear LED safety interval
+  if (ledSafetyCheckInterval) {
+    clearInterval(ledSafetyCheckInterval);
+    ledSafetyCheckInterval = null;
+  }
+
+  // Immediately kill audio playback
+  if (playbackProcess && !playbackProcess.killed) {
+    try {
+      playbackProcess.kill("SIGKILL");
+    } catch (error) {
+      console.error("Error killing playback process:", error);
+    }
+    playbackProcess = null;
+  }
+
+  if (audioStream && !audioStream.destroyed) {
+    try {
+      audioStream.destroy();
+    } catch (error) {
+      console.error("Error destroying audio stream:", error);
+    }
+    audioStream = null;
+  }
 
   responseChunks = [];
   audioBuffer = [];
@@ -297,10 +403,6 @@ function cleanup(exitAfter = true) {
     } catch (e) {
       console.error("Error closing handset WebSocket:", e);
     }
-  }
-
-  if (exitAfter) {
-    process.exit(0);
   }
 
   cleanupInProgress = false;
@@ -369,7 +471,7 @@ function startRecording(ws) {
         handsetWs.send(
           JSON.stringify({
             event: "open_ai_realtime_client_message",
-            message: "recording_started"
+            message: "Started recording"
           })
         );
       }
@@ -444,7 +546,7 @@ function startRecording(ws) {
               handsetWs.send(
                 JSON.stringify({
                   event: "open_ai_realtime_client_message",
-                  message: "recording_stopped"
+                  message: "Stopped recording"
                 })
               );
             }
@@ -463,7 +565,7 @@ function startRecording(ws) {
           handsetWs.send(
             JSON.stringify({
               event: "open_ai_realtime_client_message",
-              message: "recording_stopped"
+              message: "Stopped recording"
             })
           );
         }
@@ -483,7 +585,7 @@ function startRecording(ws) {
           handsetWs.send(
             JSON.stringify({
               event: "open_ai_realtime_client_message",
-              message: "recording_stopped"
+              message: "Stopped recording"
             })
           );
         }
@@ -499,7 +601,7 @@ function startRecording(ws) {
         handsetWs.send(
           JSON.stringify({
             event: "open_ai_realtime_client_message",
-            message: "recording_stopped"
+            message: "Stopped recording"
           })
         );
       }
@@ -537,19 +639,35 @@ async function playAudioChunk(base64Audio) {
     lastChunkTime = Date.now();
 
     if (!audioStream || !playbackProcess || playbackProcess.killed) {
-      await endAudioPlayback();
+      if (playbackProcess) {
+        try {
+          playbackProcess.kill();
+          playbackProcess = null;
+        } catch (err) {
+          console.error("Error killing existing playback process:", err);
+        }
+      }
 
-      audioStream = new PassThrough();
+      if (audioStream) {
+        try {
+          audioStream.end();
+          audioStream = null;
+        } catch (err) {
+          console.error("Error ending existing audio stream:", err);
+        }
+      }
+
+      audioStream = new PassThrough({ highWaterMark: 512 });
       playbackStartTime = Date.now();
       isPlaying = true;
 
-      const header = createWavHeader(50000000);
+      const header = createWavHeader(2000000);
       audioStream.write(header);
 
       playbackProcess = spawn("sox", [
         "-q",
         "--buffer",
-        "512",
+        "64",
         "-t",
         "wav",
         "-",
@@ -558,21 +676,9 @@ async function playAudioChunk(base64Audio) {
         "plughw:3,0",
         "rate",
         "24k",
-        "norm",
-        "-3",
         "vol",
         "5",
-        "pad",
-        "0.5",
-        "0.5",
-        "gain",
-        "-n",
-        "silence",
-        "1",
-        "0.1",
-        "1%",
-        "delay",
-        "0.5"
+        "stat"
       ]);
 
       if (!playbackProcess.pid) {
@@ -583,28 +689,20 @@ async function playAudioChunk(base64Audio) {
         if (error.code !== "EPIPE") {
           console.error("Audio stream error:", error);
         }
-        cleanupAudio();
       });
 
       playbackProcess.stdin.on("error", (error) => {
         if (error.code !== "EPIPE") {
           console.error("Playback stdin error:", error);
         }
-        cleanupAudio();
       });
 
       try {
-        audioStream.pipe(playbackProcess.stdin, { highWaterMark: 1024 * 1024 });
+        audioStream.pipe(playbackProcess.stdin, { end: false });
       } catch (error) {
         console.error("Error setting up audio pipe:", error);
-        cleanupAudio();
         return;
       }
-
-      playbackProcess.on("error", (error) => {
-        console.error("Playback error:", error);
-        cleanupAudio();
-      });
 
       playbackProcess.stdin.on("drain", () => {
         if (audioStream && !audioStream.destroyed) {
@@ -612,81 +710,99 @@ async function playAudioChunk(base64Audio) {
         }
       });
 
-      playbackProcess.on("close", (code) => {
-        cleanupAudio();
+      let stderrData = "";
+
+      playbackProcess.stderr.on("data", (data) => {
+        stderrData += data.toString();
       });
 
-      setTimeout(() => {
-        if (playbackProcess && !playbackProcess.killed && !isPlaying) {
-          console.error("Playback process not playing after initialization");
-          cleanupAudio();
+      // Handle natural completion of playback
+      playbackProcess.on("close", (code) => {
+        // Only take action if we're still playing and handset is up
+        if (isPlaying && handsetState === "up") {
+          if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+            handsetWs.send(
+              JSON.stringify({
+                event: "open_ai_realtime_client_message",
+                message: "Playback process completed"
+              })
+            );
+          }
         }
-      }, 1000);
+
+        // Reset state variables
+        isPlaying = false;
+        playbackProcess = null;
+        audioStream = null;
+      });
     }
 
     if (
-      !audioStream ||
-      audioStream.destroyed ||
-      !playbackProcess ||
-      playbackProcess.killed
+      audioStream &&
+      !audioStream.destroyed &&
+      playbackProcess &&
+      !playbackProcess.killed
     ) {
-      console.error("Invalid playback state, reinitializing...");
-      await endAudioPlayback();
-      return playAudioChunk(base64Audio);
-    }
+      try {
+        const canWrite = audioStream.write(audioData);
+        if (!canWrite) {
+          setTimeout(() => {
+            if (audioStream && !audioStream.destroyed) {
+              audioStream.resume();
+            }
+          }, 5);
+        }
+      } catch (error) {
+        console.error("Error writing audio data:", error);
+      }
+    } else {
+      if (audioStream) audioStream.end();
+      if (playbackProcess && !playbackProcess.killed) playbackProcess.kill();
 
-    try {
-      const canWrite = audioStream.write(audioData);
-      if (!canWrite) {
-        await new Promise((resolve) =>
-          playbackProcess.stdin.once("drain", resolve)
-        );
-        audioStream.resume();
-      }
-    } catch (error) {
-      if (error.code !== "EPIPE") {
-        console.error("Error writing to audio stream:", error);
-      }
-      cleanupAudio();
+      audioStream = null;
+      playbackProcess = null;
+
+      setTimeout(() => playAudioChunk(base64Audio), 10);
     }
   } catch (error) {
     console.error("Error playing audio chunk:", error);
-    cleanupAudio();
   }
 }
 
 function cleanupAudio() {
-  if (audioStream) {
-    try {
-      if (!audioStream.destroyed) {
-        audioStream.end();
-      }
-      audioStream = null;
-    } catch (error) {
-      if (error.code !== "EPIPE") {
-        console.error("Error cleaning up audio stream:", error);
-      }
-      audioStream = null;
+  // Instead of killing playback, just set up completion detection
+  if (playbackProcess && !playbackProcess.killed) {
+    // Set up a listener for natural completion if not already added
+    if (!playbackProcess._naturalCompletionListenerAdded) {
+      playbackProcess._naturalCompletionListenerAdded = true;
+
+      playbackProcess.once("close", () => {
+        audioStream = null;
+        playbackProcess = null;
+        isPlaying = false;
+      });
     }
+  } else {
+    // Process already gone, reset variables
+    playbackProcess = null;
   }
 
-  if (playbackProcess) {
-    try {
-      if (!playbackProcess.killed) {
-        playbackProcess.kill();
-      }
-      playbackProcess = null;
-    } catch (error) {
-      console.error("Error cleaning up playback process:", error);
-      playbackProcess = null;
-    }
+  // Don't destroy the audio stream, let it finish naturally
+  if (audioStream && !audioStream.destroyed) {
+    // Just add a completion listener
+    audioStream.once("end", () => {
+      audioStream = null;
+    });
+  } else {
+    audioStream = null;
   }
 
+  // Reset state variables but don't kill processes
   totalAudioLength = 0;
   playbackStartTime = 0;
-  isPlaying = false;
   audioBuffer = [];
   isProcessingAudio = false;
+  lastChunkTime = 0;
 }
 
 function endAudioPlayback() {
@@ -696,31 +812,21 @@ function endAudioPlayback() {
       return;
     }
 
-    if (playbackProcess) {
-      playbackProcess.once("close", () => {
-        cleanupAudio();
-        resolve();
-      });
+    // Only resolve when the playback naturally completes
+    if (playbackProcess && !playbackProcess.killed) {
+      // Set up a listener for natural completion
+      if (!playbackProcess._naturalCompletionListenerAdded) {
+        playbackProcess._naturalCompletionListenerAdded = true;
 
-      if (audioStream && !audioStream.destroyed) {
-        try {
-          audioStream.end(() => {
-            if (playbackProcess && !playbackProcess.killed) {
-              playbackProcess.stdin.end();
-            }
-          });
-        } catch (error) {
-          if (error.code !== "EPIPE") {
-            console.error("Error ending audio stream:", error);
-          }
-          cleanupAudio();
+        playbackProcess.once("close", () => {
+          audioStream = null;
+          playbackProcess = null;
+          isPlaying = false;
           resolve();
-        }
-      } else {
-        cleanupAudio();
-        resolve();
+        });
       }
     } else {
+      // No active process, just resolve
       resolve();
     }
   });
@@ -742,8 +848,10 @@ function handleEvent(message) {
             "You are a helpful AI assistant. Please provide clear and concise responses.",
           input_audio_format: "pcm16",
           turn_detection: {
-            type: "semantic_vad",
-            eagerness: "high",
+            type: "server_vad",
+            threshold: 0.25,
+            prefix_padding_ms: 250,
+            silence_duration_ms: 250,
             create_response: true,
             interrupt_response: true
           }
@@ -757,7 +865,7 @@ function handleEvent(message) {
       handsetWs.send(
         JSON.stringify({
           event: "open_ai_realtime_client_message",
-          message: "user_input_started"
+          message: "User started talking"
         })
       );
     }
@@ -766,26 +874,19 @@ function handleEvent(message) {
       handsetWs.send(
         JSON.stringify({
           event: "open_ai_realtime_client_message",
-          message: "user_input_stopped"
+          message: "User stopped talking"
         })
       );
-    }
-  } else if (serverEvent.type === "response.audio.delta") {
-    if (!isPlaying) {
-      isPlaying = true;
-
-      if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
-        if (handsetState === "up") {
-          handsetWs.send(JSON.stringify({ event: "led_off" }));
-        }
-        handsetWs.send(
-          JSON.stringify({
-            event: "open_ai_realtime_client_message",
-            message: "openai_response_started"
-          })
-        );
+      if (handsetState === "up") {
+        handsetWs.send(JSON.stringify({ event: "led_off" }));
+        setTimeout(() => {
+          handsetWs.send(JSON.stringify({ event: "led_on" }));
+        }, 200);
       }
     }
+  } else if (serverEvent.type === "response.audio.delta") {
+    playAudioChunk(serverEvent.delta);
+    lastChunkTime = Date.now();
 
     const chunkSize = serverEvent.delta.length;
 
@@ -799,18 +900,20 @@ function handleEvent(message) {
 
       if (handsetState === "up") {
         handsetWs.send(JSON.stringify({ event: "led_on" }));
-      }
-      if (ledOffTimer) clearTimeout(ledOffTimer);
-      ledOffTimer = setTimeout(() => {
-        if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
-          if (handsetState === "up") {
+        if (ledOffTimer) clearTimeout(ledOffTimer);
+        ledOffTimer = setTimeout(() => {
+          if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
             handsetWs.send(JSON.stringify({ event: "led_off" }));
-          }
-        }
-      }, 50);
-    }
 
-    playAudioChunk(serverEvent.delta);
+            setTimeout(() => {
+              if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+                handsetWs.send(JSON.stringify({ event: "led_on" }));
+              }
+            }, 50);
+          }
+        }, 50);
+      }
+    }
   } else if (serverEvent.type === "response.content_part.done") {
     const responseText = serverEvent.part.transcript;
 
@@ -826,27 +929,41 @@ function handleEvent(message) {
       );
     }
 
-    const checkPlaybackComplete = setInterval(() => {
-      if (Date.now() - lastChunkTime > chunkTimeout) {
-        clearInterval(checkPlaybackComplete);
-
-        setTimeout(async () => {
-          await endAudioPlayback();
-          if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
-            if (handsetState === "up") {
-              handsetWs.send(JSON.stringify({ event: "led_off" }));
-            }
-          }
-
-          isResponseComplete = false;
-          isPlaying = false;
-
-          if (!isRecording && handsetState === "up") {
-            startRecording(ws);
-          }
-        }, 1000);
+    // Just monitor for natural completion but never force stop
+    const waitForNaturalCompletion = () => {
+      if (Date.now() - lastChunkTime < chunkTimeout) {
+        // Still receiving audio chunks, check again later
+        setTimeout(waitForNaturalCompletion, 100);
+        return;
       }
-    }, 100);
+
+      // Set up listener for natural completion
+      if (playbackProcess) {
+        // If we haven't already set up a close listener, add one
+        if (!playbackProcess._naturalCompletionListenerAdded) {
+          playbackProcess._naturalCompletionListenerAdded = true;
+
+          playbackProcess.once("close", () => {
+            isResponseComplete = false;
+            isPlaying = false;
+
+            if (!isRecording && handsetState === "up") {
+              startRecording(ws);
+            }
+          });
+        }
+      } else {
+        // No playback process, just reset state
+        isResponseComplete = false;
+        isPlaying = false;
+
+        if (!isRecording && handsetState === "up") {
+          startRecording(ws);
+        }
+      }
+    };
+
+    setTimeout(waitForNaturalCompletion, 100);
   }
 }
 
@@ -860,4 +977,10 @@ setTimeout(() => {
 
 process.on("SIGTERM", () => {
   cleanup(true);
+  process.exit(0);
+});
+
+process.on("SIGINT", () => {
+  cleanup(true);
+  process.exit(0);
 });
