@@ -49,6 +49,10 @@ function playWelcomeAudio() {
   return new Promise((resolve, reject) => {
     setTimeout(() => {
       if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+        if (handsetState === "up") {
+          handsetWs.send(JSON.stringify({ event: "led_on" }));
+        }
+
         handsetWs.send(
           JSON.stringify({
             event: "open_ai_realtime_client_message",
@@ -109,15 +113,9 @@ function initHandsetWebSocket() {
         handsetState = event.state;
         if (event.state === "up") {
           if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
-            if (handsetState === "up") {
-              handsetWs.send(JSON.stringify({ event: "led_off" }));
-              setTimeout(() => {
-                handsetWs.send(JSON.stringify({ event: "led_on" }));
-              }, 200);
-            }
+            handsetWs.send(JSON.stringify({ event: "led_off" }));
           }
 
-          // Set up safety interval to prevent LED from getting stuck off
           if (ledSafetyCheckInterval) {
             clearInterval(ledSafetyCheckInterval);
           }
@@ -135,14 +133,17 @@ function initHandsetWebSocket() {
           playWelcomeAudio();
           initOpenAIWebSocket();
         } else if (event.state === "down") {
-          // Clear safety interval when handset is down
           if (ledSafetyCheckInterval) {
             clearInterval(ledSafetyCheckInterval);
             ledSafetyCheckInterval = null;
           }
 
           if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
-            handsetWs.send(JSON.stringify({ event: "led_on" }));
+            handsetWs.send(JSON.stringify({ event: "led_off" }));
+            setTimeout(() => {
+              handsetWs.send(JSON.stringify({ event: "led_on" }));
+            }, 200);
+
             handsetWs.send(
               JSON.stringify({
                 event: "open_ai_realtime_client_message",
@@ -161,7 +162,6 @@ function initHandsetWebSocket() {
               return ensureRecordingStopped();
             }
 
-            // When handset is down, immediately kill audio playback
             if (playbackProcess && !playbackProcess.killed) {
               if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
                 handsetWs.send(
@@ -172,7 +172,6 @@ function initHandsetWebSocket() {
                 );
               }
 
-              // Immediately kill the playback process
               try {
                 playbackProcess.kill("SIGKILL");
               } catch (err) {
@@ -192,7 +191,6 @@ function initHandsetWebSocket() {
 
             isPlaying = false;
 
-            // Clean up the connection to OpenAI
             if (ws && ws.readyState === WebSocket.OPEN) {
               try {
                 ws.send(JSON.stringify({ type: "session.end" }));
@@ -349,13 +347,11 @@ function cleanup(exitAfter = true) {
 
   stopRecording();
 
-  // Clear LED safety interval
   if (ledSafetyCheckInterval) {
     clearInterval(ledSafetyCheckInterval);
     ledSafetyCheckInterval = null;
   }
 
-  // Immediately kill audio playback
   if (playbackProcess && !playbackProcess.killed) {
     try {
       playbackProcess.kill("SIGKILL");
@@ -716,9 +712,7 @@ async function playAudioChunk(base64Audio) {
         stderrData += data.toString();
       });
 
-      // Handle natural completion of playback
       playbackProcess.on("close", (code) => {
-        // Only take action if we're still playing and handset is up
         if (isPlaying && handsetState === "up") {
           if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
             handsetWs.send(
@@ -730,7 +724,6 @@ async function playAudioChunk(base64Audio) {
           }
         }
 
-        // Reset state variables
         isPlaying = false;
         playbackProcess = null;
         audioStream = null;
@@ -770,9 +763,7 @@ async function playAudioChunk(base64Audio) {
 }
 
 function cleanupAudio() {
-  // Instead of killing playback, just set up completion detection
   if (playbackProcess && !playbackProcess.killed) {
-    // Set up a listener for natural completion if not already added
     if (!playbackProcess._naturalCompletionListenerAdded) {
       playbackProcess._naturalCompletionListenerAdded = true;
 
@@ -783,13 +774,10 @@ function cleanupAudio() {
       });
     }
   } else {
-    // Process already gone, reset variables
     playbackProcess = null;
   }
 
-  // Don't destroy the audio stream, let it finish naturally
   if (audioStream && !audioStream.destroyed) {
-    // Just add a completion listener
     audioStream.once("end", () => {
       audioStream = null;
     });
@@ -797,7 +785,6 @@ function cleanupAudio() {
     audioStream = null;
   }
 
-  // Reset state variables but don't kill processes
   totalAudioLength = 0;
   playbackStartTime = 0;
   audioBuffer = [];
@@ -812,9 +799,7 @@ function endAudioPlayback() {
       return;
     }
 
-    // Only resolve when the playback naturally completes
     if (playbackProcess && !playbackProcess.killed) {
-      // Set up a listener for natural completion
       if (!playbackProcess._naturalCompletionListenerAdded) {
         playbackProcess._naturalCompletionListenerAdded = true;
 
@@ -826,7 +811,6 @@ function endAudioPlayback() {
         });
       }
     } else {
-      // No active process, just resolve
       resolve();
     }
   });
@@ -929,17 +913,13 @@ function handleEvent(message) {
       );
     }
 
-    // Just monitor for natural completion but never force stop
     const waitForNaturalCompletion = () => {
       if (Date.now() - lastChunkTime < chunkTimeout) {
-        // Still receiving audio chunks, check again later
         setTimeout(waitForNaturalCompletion, 100);
         return;
       }
 
-      // Set up listener for natural completion
       if (playbackProcess) {
-        // If we haven't already set up a close listener, add one
         if (!playbackProcess._naturalCompletionListenerAdded) {
           playbackProcess._naturalCompletionListenerAdded = true;
 
@@ -953,7 +933,6 @@ function handleEvent(message) {
           });
         }
       } else {
-        // No playback process, just reset state
         isResponseComplete = false;
         isPlaying = false;
 
