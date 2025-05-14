@@ -46,10 +46,7 @@ let ledOffTimer = null;
 
 function playWelcomeAudio() {
   return new Promise((resolve, reject) => {
-    console.log("Waiting to play welcome audio...");
-    // Add  delay before playing
     setTimeout(() => {
-      console.log("Playing welcome audio...");
       handsetWs.send(
         JSON.stringify({
           event: "open_ai_realtime_client_message",
@@ -58,6 +55,7 @@ function playWelcomeAudio() {
       );
       const welcomeProcess = spawn("sox", [
         audioDirectory + "/alloy-welcome.wav",
+        "-q",
         "-t",
         "alsa",
         "plughw:3,0",
@@ -71,12 +69,10 @@ function playWelcomeAudio() {
 
       welcomeProcess.on("error", (error) => {
         console.error("Error playing welcome audio:", error);
-        resolve(); // Resolve anyway to continue with normal flow
+        resolve();
       });
 
       welcomeProcess.on("close", (code) => {
-        console.log("Welcome audio finished with code:", code);
-
         if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
           handsetWs.send(
             JSON.stringify({
@@ -84,7 +80,10 @@ function playWelcomeAudio() {
               message: "finished_playing_welcome_message"
             })
           );
-          handsetWs.send(JSON.stringify({ event: "led_off" }));
+
+          if (handsetState === "up") {
+            handsetWs.send(JSON.stringify({ event: "led_off" }));
+          }
         }
 
         resolve();
@@ -96,55 +95,36 @@ function playWelcomeAudio() {
 function initHandsetWebSocket() {
   handsetWs = new WebSocket(HARDWARE_SOCKET_SERVER);
 
-  handsetWs.on("open", function open() {
-    console.log("Connected to handset state WebSocket");
-  });
-
   handsetWs.on("message", function message(data) {
     try {
       const event = JSON.parse(data.toString());
-      console.log("Received handset event:", event);
       if (event.event === "handset_state") {
         handsetState = event.state;
         if (event.state === "up") {
-          console.log("Playing welcome audio");
           playWelcomeAudio();
-          console.log("Initializing OpenAI connection");
           initOpenAIWebSocket();
         } else if (event.state === "down") {
-          console.log("Handset state is down - stopping current session");
-
           if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
             handsetWs.send(JSON.stringify({ event: "led_on" }));
           }
 
-          // Immediately try to kill any recording processes
-          exec("pkill -9 rec", () => {
-            console.log("Killed any existing rec processes");
-          });
-
-          // Stop recording
+          exec("pkill -9 rec");
           stopRecording();
 
-          // Wait for recording to stop before proceeding with cleanup
           const ensureRecordingStopped = async () => {
-            // Try to stop recording again if needed
             if (isRecording || recordingProcess) {
               stopRecording();
               await new Promise((resolve) => setTimeout(resolve, 500));
               return ensureRecordingStopped();
             }
 
-            // Once recording is confirmed stopped, clean up audio and session
             await endAudioPlayback();
             cleanup(false);
             ws = null;
-            console.log("Ready for next handset up state");
           };
 
           ensureRecordingStopped().catch((error) => {
             console.error("Error during recording cleanup:", error);
-            // Force cleanup as last resort
             cleanup(false);
             ws = null;
           });
@@ -157,24 +137,19 @@ function initHandsetWebSocket() {
 
   handsetWs.on("error", function error(err) {
     console.error("Handset WebSocket error:", err);
-    // Try to reconnect after a delay
     setTimeout(initHandsetWebSocket, 5000);
   });
 
   handsetWs.on("close", function close() {
-    console.log("Handset WebSocket connection closed");
-    // Try to reconnect after a delay
     setTimeout(initHandsetWebSocket, 5000);
   });
 }
 
 function initOpenAIWebSocket() {
   if (ws) {
-    console.log("OpenAI WebSocket already connected");
     return;
   }
 
-  // Emit connecting event
   if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
     handsetWs.send(
       JSON.stringify({
@@ -192,8 +167,6 @@ function initOpenAIWebSocket() {
   });
 
   ws.on("open", async function open() {
-    console.log("Connected to OpenAI Realtime API");
-    // Emit connected event
     if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
       handsetWs.send(
         JSON.stringify({
@@ -207,7 +180,6 @@ function initOpenAIWebSocket() {
   ws.on("message", handleEvent);
   ws.on("error", function error(err) {
     console.error("WebSocket error:", err);
-    // Emit error event
     if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
       handsetWs.send(
         JSON.stringify({
@@ -217,12 +189,10 @@ function initOpenAIWebSocket() {
         })
       );
     }
-    cleanup(false); // Don't exit process, just clean up resources
+    cleanup(false);
   });
 
   ws.on("close", function close() {
-    console.log("WebSocket connection closed");
-    // Emit disconnected event
     if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
       handsetWs.send(
         JSON.stringify({
@@ -231,35 +201,29 @@ function initOpenAIWebSocket() {
         })
       );
     }
-    cleanup(false); // Don't exit process, just clean up resources
+    cleanup(false);
   });
 }
 
 function stopRecording() {
   if (recordingProcess) {
-    console.log("Stopping recording process...");
     try {
-      // Try to kill the process with increasing force
       const killProcess = () => {
         try {
           if (!recordingProcess || recordingProcess.killed) return;
 
-          // Try SIGTERM first
           recordingProcess.kill("SIGTERM");
 
           setTimeout(() => {
             if (!recordingProcess || recordingProcess.killed) return;
 
-            // If still running, try SIGKILL
             recordingProcess.kill("SIGKILL");
 
             setTimeout(() => {
               if (!recordingProcess || recordingProcess.killed) return;
 
-              // If somehow still running, use pkill as last resort
               exec("pkill -9 rec", () => {
                 recordingProcess = null;
-                console.log("Used pkill to stop recording process");
               });
             }, 100);
           }, 100);
@@ -278,7 +242,6 @@ function stopRecording() {
 
   isRecording = false;
 
-  // Emit recording state event
   if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
     handsetWs.send(
       JSON.stringify({
@@ -288,12 +251,10 @@ function stopRecording() {
     );
   }
 
-  // Clean up any temp files that might be left
   try {
     const tempFile = `${tempAudioDirectory}/recording.wav`;
     if (fs.existsSync(tempFile)) {
       fs.unlinkSync(tempFile);
-      console.log("Cleaned up temporary recording file");
     }
   } catch (error) {
     console.error("Error cleaning up temp recording file:", error);
@@ -304,15 +265,9 @@ function cleanup(exitAfter = true) {
   if (cleanupInProgress) return;
   cleanupInProgress = true;
 
-  console.log("\nCleaning up...");
-
-  // Stop recording with the new function
   stopRecording();
-
-  // Stop playback
   endAudioPlayback();
 
-  // Clear any pending audio
   responseChunks = [];
   audioBuffer = [];
   isProcessingAudio = false;
@@ -320,7 +275,6 @@ function cleanup(exitAfter = true) {
   totalAudioLength = 0;
   playbackStartTime = 0;
 
-  // Close OpenAI WebSocket connection
   if (ws) {
     try {
       if (ws.readyState === WebSocket.OPEN) {
@@ -334,7 +288,6 @@ function cleanup(exitAfter = true) {
     }
   }
 
-  // Close handset WebSocket connection only if we're exiting
   if (exitAfter && handsetWs) {
     try {
       if (handsetWs.readyState === WebSocket.OPEN) {
@@ -392,34 +345,26 @@ function createWavHeader(dataLength) {
 }
 
 function startRecording(ws) {
-  console.log("Starting recording...");
   if (isRecording) {
-    console.log(
-      "Already recording - waiting for current recording to finish..."
-    );
     return;
   }
 
-  // Ensure clean state
   isRecording = false;
   if (recordingProcess) {
     try {
       recordingProcess.kill("SIGTERM");
       recordingProcess = null;
     } catch (e) {
-      console.log("Note: Could not kill previous recording process");
+      console.error(e);
     }
   }
 
-  // Add a small delay before starting new recording to let audio device reset
   setTimeout(() => {
     try {
-      // Clear any existing audio chunks
       responseChunks = [];
 
       isRecording = true;
 
-      // Emit recording state event to all clients
       if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
         handsetWs.send(
           JSON.stringify({
@@ -431,27 +376,26 @@ function startRecording(ws) {
 
       const tempFile = `${tempAudioDirectory}/recording.wav`;
 
-      // Record audio continuously to a WAV file with explicit format settings
       recordingProcess = spawn("rec", [
+        "-q",
         "-t",
         "alsa",
-        "default", // Use default input device
+        "default",
         "-t",
-        "wav", // Output format
-        tempFile, // Output file
+        "wav",
+        tempFile,
         "rate",
-        "24k", // Sample rate
+        "24k",
         "channels",
-        "1", // Mono
+        "1",
         "trim",
         "0",
-        "2", // Record in 2-second chunks
-        ":" // Loop recording
+        "2",
+        ":"
       ]);
 
-      let lastSize = 44; // Start after WAV header
+      let lastSize = 44;
 
-      // Check for new data every 100ms
       const checkInterval = setInterval(() => {
         try {
           if (!fs.existsSync(tempFile)) return;
@@ -464,7 +408,6 @@ function startRecording(ws) {
             fs.readSync(fd, buffer, 0, stats.size - lastSize, lastSize);
             fs.closeSync(fd);
 
-            // Send the new data
             if (ws && ws.readyState === WebSocket.OPEN) {
               ws.send(
                 JSON.stringify({
@@ -487,21 +430,16 @@ function startRecording(ws) {
         const info = data.toString().toLowerCase();
         if (info.includes("error") || info.includes("warning")) {
           console.error("Recording error/warning:", info);
-          // If we get a critical error, try to restart recording
           if (
             info.includes("can't encode") ||
             info.includes("not applicable")
           ) {
-            console.log(
-              "Critical recording error detected, attempting to restart..."
-            );
             clearInterval(checkInterval);
             if (recordingProcess) {
               recordingProcess.kill("SIGTERM");
               recordingProcess = null;
             }
             isRecording = false;
-            // Emit recording stopped event
             if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
               handsetWs.send(
                 JSON.stringify({
@@ -512,8 +450,6 @@ function startRecording(ws) {
             }
             setTimeout(() => startRecording(ws), 1000);
           }
-        } else {
-          console.log("Audio info:", info);
         }
       });
 
@@ -522,7 +458,7 @@ function startRecording(ws) {
         clearInterval(checkInterval);
         isRecording = false;
         recordingProcess = null;
-        // Emit recording stopped event
+
         if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
           handsetWs.send(
             JSON.stringify({
@@ -531,19 +467,18 @@ function startRecording(ws) {
             })
           );
         }
+
         try {
           fs.unlinkSync(tempFile);
         } catch (e) {}
-        // Try to restart recording after error
+
         setTimeout(() => startRecording(ws), 1000);
       });
 
       recordingProcess.on("close", (code) => {
-        console.log("Recording stopped with code:", code);
         clearInterval(checkInterval);
         isRecording = false;
         recordingProcess = null;
-        // Emit recording stopped event
         if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
           handsetWs.send(
             JSON.stringify({
@@ -559,7 +494,7 @@ function startRecording(ws) {
     } catch (error) {
       console.error("Error starting recording:", error);
       isRecording = false;
-      // Emit recording stopped event
+
       if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
         handsetWs.send(
           JSON.stringify({
@@ -568,10 +503,10 @@ function startRecording(ws) {
           })
         );
       }
-      // Try to restart recording after error
+
       setTimeout(() => startRecording(ws), 1000);
     }
-  }, 500); // Add 500ms delay before starting new recording
+  }, 500);
 }
 
 function floatTo16BitPCM(float32Array) {
@@ -601,21 +536,18 @@ async function playAudioChunk(base64Audio) {
     const audioData = Buffer.from(base64Audio, "base64");
     lastChunkTime = Date.now();
 
-    // Ensure clean state before starting new playback
     if (!audioStream || !playbackProcess || playbackProcess.killed) {
-      // Clean up any existing resources first
       await endAudioPlayback();
 
       audioStream = new PassThrough();
       playbackStartTime = Date.now();
       isPlaying = true;
 
-      // Create WAV header for the stream
       const header = createWavHeader(50000000);
       audioStream.write(header);
 
-      // Start sox process for streaming playback
       playbackProcess = spawn("sox", [
+        "-q",
         "--buffer",
         "512",
         "-t",
@@ -643,12 +575,10 @@ async function playAudioChunk(base64Audio) {
         "0.5"
       ]);
 
-      // Verify playback process started successfully
       if (!playbackProcess.pid) {
         throw new Error("Failed to start playback process");
       }
 
-      // Handle errors on the audio stream
       audioStream.on("error", (error) => {
         if (error.code !== "EPIPE") {
           console.error("Audio stream error:", error);
@@ -663,7 +593,6 @@ async function playAudioChunk(base64Audio) {
         cleanupAudio();
       });
 
-      // Set up pipe with error handling
       try {
         audioStream.pipe(playbackProcess.stdin, { highWaterMark: 1024 * 1024 });
       } catch (error) {
@@ -684,11 +613,9 @@ async function playAudioChunk(base64Audio) {
       });
 
       playbackProcess.on("close", (code) => {
-        console.log(`Playback process closed with code ${code}`);
         cleanupAudio();
       });
 
-      // Add a watchdog to ensure process is running
       setTimeout(() => {
         if (playbackProcess && !playbackProcess.killed && !isPlaying) {
           console.error("Playback process not playing after initialization");
@@ -697,7 +624,6 @@ async function playAudioChunk(base64Audio) {
       }, 1000);
     }
 
-    // Verify we have valid stream before writing
     if (
       !audioStream ||
       audioStream.destroyed ||
@@ -706,10 +632,9 @@ async function playAudioChunk(base64Audio) {
     ) {
       console.error("Invalid playback state, reinitializing...");
       await endAudioPlayback();
-      return playAudioChunk(base64Audio); // Retry once
+      return playAudioChunk(base64Audio);
     }
 
-    // Write chunk immediately
     try {
       const canWrite = audioStream.write(audioData);
       if (!canWrite) {
@@ -772,13 +697,11 @@ function endAudioPlayback() {
     }
 
     if (playbackProcess) {
-      // Wait for the playback process to finish naturally
       playbackProcess.once("close", () => {
         cleanupAudio();
         resolve();
       });
 
-      // End the process input
       if (audioStream && !audioStream.destroyed) {
         try {
           audioStream.end(() => {
@@ -808,7 +731,6 @@ function handleEvent(message) {
 
   if (serverEvent.type === "session.created") {
     sessionId = serverEvent.session;
-    console.log("Session created:", sessionId);
     isResponseComplete = false;
     lastChunkTime = 0;
 
@@ -829,10 +751,8 @@ function handleEvent(message) {
       })
     );
 
-    console.log("\nStarting recording...");
     startRecording(ws);
   } else if (serverEvent.type === "input_audio_buffer.speech_started") {
-    console.log("User input started");
     if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
       handsetWs.send(
         JSON.stringify({
@@ -842,7 +762,6 @@ function handleEvent(message) {
       );
     }
   } else if (serverEvent.type === "input_audio_buffer.speech_stopped") {
-    console.log("User input stopped");
     if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
       handsetWs.send(
         JSON.stringify({
@@ -852,13 +771,13 @@ function handleEvent(message) {
       );
     }
   } else if (serverEvent.type === "response.audio.delta") {
-    // If this is the first chunk of a new response
     if (!isPlaying) {
-      console.log("Starting to receive OpenAI response");
       isPlaying = true;
-      // Emit response started event
+
       if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
-        handsetWs.send(JSON.stringify({ event: "led_off" }));
+        if (handsetState === "up") {
+          handsetWs.send(JSON.stringify({ event: "led_off" }));
+        }
         handsetWs.send(
           JSON.stringify({
             event: "open_ai_realtime_client_message",
@@ -869,9 +788,7 @@ function handleEvent(message) {
     }
 
     const chunkSize = serverEvent.delta.length;
-    console.log("Received audio chunk:", chunkSize, "bytes");
 
-    // Emit chunk received event
     if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
       handsetWs.send(
         JSON.stringify({
@@ -879,12 +796,16 @@ function handleEvent(message) {
           message: `Received audio chunk: ${chunkSize} bytes`
         })
       );
-      // Blink the LED for each chunk
-      handsetWs.send(JSON.stringify({ event: "led_on" }));
+
+      if (handsetState === "up") {
+        handsetWs.send(JSON.stringify({ event: "led_on" }));
+      }
       if (ledOffTimer) clearTimeout(ledOffTimer);
       ledOffTimer = setTimeout(() => {
         if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
-          handsetWs.send(JSON.stringify({ event: "led_off" }));
+          if (handsetState === "up") {
+            handsetWs.send(JSON.stringify({ event: "led_off" }));
+          }
         }
       }, 50);
     }
@@ -892,7 +813,6 @@ function handleEvent(message) {
     playAudioChunk(serverEvent.delta);
   } else if (serverEvent.type === "response.content_part.done") {
     const responseText = serverEvent.part.transcript;
-    console.log("Response:", responseText);
 
     isResponseComplete = true;
     if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
@@ -906,22 +826,21 @@ function handleEvent(message) {
       );
     }
 
-    // Start a check for playback completion
     const checkPlaybackComplete = setInterval(() => {
-      // Consider playback complete if no new chunks received for chunkTimeout ms
       if (Date.now() - lastChunkTime > chunkTimeout) {
         clearInterval(checkPlaybackComplete);
 
-        // Add a small delay to ensure last chunk is fully played
         setTimeout(async () => {
           await endAudioPlayback();
-          console.log("Playback finished!");
           if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
-            handsetWs.send(JSON.stringify({ event: "led_off" }));
+            if (handsetState === "up") {
+              handsetWs.send(JSON.stringify({ event: "led_off" }));
+            }
           }
+
           isResponseComplete = false;
           isPlaying = false;
-          // Only start recording if handset is up and not already recording
+
           if (!isRecording && handsetState === "up") {
             startRecording(ws);
           }
@@ -931,17 +850,14 @@ function handleEvent(message) {
   }
 }
 
-console.log("Starting up...");
 initHandsetWebSocket();
-// Emit led_on event when script is ready
+
 setTimeout(() => {
   if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
     handsetWs.send(JSON.stringify({ event: "led_on" }));
   }
 }, 1000);
 
-// Add SIGTERM handler
 process.on("SIGTERM", () => {
-  console.log("Received SIGTERM - Cleaning up...");
   cleanup(true);
 });
