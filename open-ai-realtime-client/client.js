@@ -829,7 +829,7 @@ function handleEvent(message) {
         type: "session.update",
         session: {
           instructions:
-            "You are a helpful AI assistant. Please provide clear and concise responses, under 50 words.",
+            "You are a helpful AI assistant for people visiting FCC Studio. Please provide clear and concise responses, under 50 words.",
           input_audio_format: "pcm16",
           turn_detection: {
             type: "server_vad",
