@@ -20,7 +20,7 @@ if (!fs.existsSync(tempAudioDirectory)) {
 dotenv.config();
 
 const OPENAI_REALTIME_SOCKET_SERVER =
-  "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview";
+  "wss://api.openai.com/v1/realtime?model=gpt-realtime";
 const HARDWARE_SOCKET_SERVER = "ws://localhost:8765";
 
 let ws = null;
@@ -829,7 +829,7 @@ function handleEvent(message) {
         type: "session.update",
         session: {
           instructions:
-            "You are a helpful AI assistant. Please provide clear and concise responses.",
+            "You are a helpful AI assistant. Please provide clear and concise responses, under 50 words.",
           input_audio_format: "pcm16",
           turn_detection: {
             type: "server_vad",
