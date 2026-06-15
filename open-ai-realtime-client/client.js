@@ -103,6 +103,38 @@ function playWelcomeAudio() {
   });
 }
 
+function warmUpAudio() {
+  // Cold-boot fix: the USB audio DAC/amp on card 3 has a multi-second
+  // wake-up latency the first time a PCM stream is opened after a cold
+  // power-on, which delayed the welcome message on the first pickup. Open
+  // the device once at startup with a brief silent buffer so the device is
+  // already warm before the first handset pickup. USB autosuspend is
+  // disabled (power/control=on), so once warmed it stays warm for the
+  // session. A warm reboot keeps the device powered, which is why it was
+  // only ever slow on the first cold boot.
+  try {
+    const warmup = spawn("sox", [
+      "-n",
+      "-q",
+      "-t",
+      "alsa",
+      "plughw:3,0",
+      "synth",
+      "2",
+      "sine",
+      "0",
+      "vol",
+      "0"
+    ]);
+
+    warmup.on("error", (error) => {
+      console.error("Error warming up audio:", error);
+    });
+  } catch (error) {
+    console.error("Failed to start audio warm-up:", error);
+  }
+}
+
 function initHandsetWebSocket() {
   handsetWs = new WebSocket(HARDWARE_SOCKET_SERVER);
 
@@ -954,6 +986,7 @@ function handleEvent(message) {
 }
 
 initHandsetWebSocket();
+warmUpAudio();
 
 setTimeout(() => {
   if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
