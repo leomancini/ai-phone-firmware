@@ -104,25 +104,27 @@ function playWelcomeAudio() {
 }
 
 function warmUpAudio() {
-  // Cold-boot fix: the USB audio DAC/amp on card 3 has a multi-second
-  // wake-up latency the first time a PCM stream is opened after a cold
-  // power-on, which delayed the welcome message on the first pickup. Open
-  // the device once at startup with a brief silent buffer so the device is
-  // already warm before the first handset pickup. USB autosuspend is
-  // disabled (power/control=on), so once warmed it stays warm for the
-  // session. A warm reboot keeps the device powered, which is why it was
-  // only ever slow on the first cold boot.
+  // Cold-boot fix: the first PCM stream opened on the card 3 USB audio
+  // DAC/amp after a cold power-on pays a one-time init/anti-pop cost
+  // (leading silence) that later opens don't, which delayed the welcome
+  // message on the first handset pickup. Play the welcome clip silently
+  // (vol 0) at startup using the exact same device/rate/effect path as the
+  // real playback, so that one-time cost is paid during boot and the first
+  // real pickup is as fast as subsequent ones. USB autosuspend is disabled
+  // (power/control=on), so the device stays warm afterwards. A warm reboot
+  // keeps the device powered, which is why it was only ever slow on a cold
+  // boot.
   try {
     const warmup = spawn("sox", [
-      "-n",
+      audioDirectory + "/alloy-welcome.wav",
       "-q",
       "-t",
       "alsa",
       "plughw:3,0",
-      "synth",
-      "2",
-      "sine",
-      "0",
+      "rate",
+      "24k",
+      "norm",
+      "-3",
       "vol",
       "0"
     ]);
