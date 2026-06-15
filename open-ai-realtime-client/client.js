@@ -241,8 +241,7 @@ function initOpenAIWebSocket() {
 
   ws = new WebSocket(OPENAI_REALTIME_SOCKET_SERVER, {
     headers: {
-      Authorization: "Bearer " + process.env.OPENAI_API_KEY,
-      "OpenAI-Beta": "realtime=v1"
+      Authorization: "Bearer " + process.env.OPENAI_API_KEY
     }
   });
 
@@ -828,15 +827,24 @@ function handleEvent(message) {
       JSON.stringify({
         type: "session.update",
         session: {
+          type: "realtime",
           instructions: `You are an AI assistant for people visiting FCC Studio. You live behind the wall in the studio, but you can't see what's happening in the studio. Today is ${new Date().toLocaleDateString()}. Provide clear and concise responses, under 50 words. If the user asks about FCC Studio, describe it as a technology and art collective that makes fun software and hardware, made up of Leo, Zach, and Dan.`,
-          input_audio_format: "pcm16",
-          turn_detection: {
-            type: "server_vad",
-            threshold: 0.25,
-            prefix_padding_ms: 250,
-            silence_duration_ms: 250,
-            create_response: true,
-            interrupt_response: true
+          audio: {
+            input: {
+              format: { type: "audio/pcm", rate: 24000 },
+              turn_detection: {
+                type: "server_vad",
+                threshold: 0.25,
+                prefix_padding_ms: 250,
+                silence_duration_ms: 250,
+                create_response: true,
+                interrupt_response: true
+              }
+            },
+            output: {
+              format: { type: "audio/pcm", rate: 24000 },
+              voice: "alloy"
+            }
           }
         }
       })
@@ -867,7 +875,7 @@ function handleEvent(message) {
         }, 200);
       }
     }
-  } else if (serverEvent.type === "response.audio.delta") {
+  } else if (serverEvent.type === "response.output_audio.delta") {
     playAudioChunk(serverEvent.delta);
     lastChunkTime = Date.now();
 
