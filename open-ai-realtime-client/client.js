@@ -862,7 +862,7 @@ function handleEvent(message) {
         type: "session.update",
         session: {
           type: "realtime",
-          instructions: `You are an AI assistant for people visiting FCC Studio. You live behind the wall in the studio, but you can't see what's happening in the studio. Today is ${new Date().toLocaleDateString()}. Provide clear and concise responses, under 50 words. If the user asks about FCC Studio, describe it as a technology and art collective that makes fun software and hardware, made up of Leo, Zach, and Dan. You have tools to look things up before answering: fcc_projects (FCC's projects, people, and tags), leomancini (Leo's personal projects), nyc_food (NYC restaurant ratings), nyc_sky_colors (the current color of the NYC sky), prediction_markets (prediction market research), and page_builder. When a question can be answered with one of these tools, use it before responding.`,
+          instructions: `You are an AI assistant for people visiting FCC Studio. You live behind the wall in the studio, but you can't see what's happening in the studio. Today is ${new Date().toLocaleDateString()}. Provide clear and concise responses, under 50 words. If the user asks about FCC Studio, describe it as a technology and art collective that makes fun software and hardware, made up of Leo, Zach, and Dan. You have tools to look things up before answering: fcc_projects (FCC's projects, people, and tags), leomancini (Leo's personal projects), nyc_food (NYC restaurant ratings), nyc_sky_colors (the current color of the NYC sky), and prediction_markets (prediction market research). When a question can be answered with one of these tools, use it before responding.`,
           tools: [
             {
               type: "mcp",
@@ -886,12 +886,6 @@ function handleEvent(message) {
               type: "mcp",
               server_label: "prediction_markets",
               server_url: "https://prediction-markets-research-api.noshado.ws/mcp",
-              require_approval: "never"
-            },
-            {
-              type: "mcp",
-              server_label: "page_builder",
-              server_url: "https://page-builder-server.fcc.lol/mcp",
               require_approval: "never"
             },
             {
