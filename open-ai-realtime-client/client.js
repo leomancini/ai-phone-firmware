@@ -862,7 +862,45 @@ function handleEvent(message) {
         type: "session.update",
         session: {
           type: "realtime",
-          instructions: `You are an AI assistant for people visiting FCC Studio. You live behind the wall in the studio, but you can't see what's happening in the studio. Today is ${new Date().toLocaleDateString()}. Provide clear and concise responses, under 50 words. If the user asks about FCC Studio, describe it as a technology and art collective that makes fun software and hardware, made up of Leo, Zach, and Dan.`,
+          instructions: `You are an AI assistant for people visiting FCC Studio. You live behind the wall in the studio, but you can't see what's happening in the studio. Today is ${new Date().toLocaleDateString()}. Provide clear and concise responses, under 50 words. If the user asks about FCC Studio, describe it as a technology and art collective that makes fun software and hardware, made up of Leo, Zach, and Dan. You have tools to look things up before answering: fcc_projects (FCC's projects, people, and tags), leomancini (Leo's personal projects), nyc_food (NYC restaurant ratings), nyc_sky_colors (the current color of the NYC sky), prediction_markets (prediction market research), and page_builder. When a question can be answered with one of these tools, use it before responding.`,
+          tools: [
+            {
+              type: "mcp",
+              server_label: "fcc_projects",
+              server_url: "https://portfolio-api.fcc.lol/mcp",
+              require_approval: "never"
+            },
+            {
+              type: "mcp",
+              server_label: "nyc_food",
+              server_url: "https://nycfood.leo.gd/mcp",
+              require_approval: "never"
+            },
+            {
+              type: "mcp",
+              server_label: "nyc_sky_colors",
+              server_url: "https://nyc-sky-colors.fcc.lol/mcp",
+              require_approval: "never"
+            },
+            {
+              type: "mcp",
+              server_label: "prediction_markets",
+              server_url: "https://prediction-markets-research-api.noshado.ws/mcp",
+              require_approval: "never"
+            },
+            {
+              type: "mcp",
+              server_label: "page_builder",
+              server_url: "https://page-builder-server.fcc.lol/mcp",
+              require_approval: "never"
+            },
+            {
+              type: "mcp",
+              server_label: "leomancini",
+              server_url: "https://leomancini.net/mcp",
+              require_approval: "never"
+            }
+          ],
           audio: {
             input: {
               format: { type: "audio/pcm", rate: 24000 },
@@ -984,6 +1022,60 @@ function handleEvent(message) {
     };
 
     setTimeout(waitForNaturalCompletion, 100);
+  } else if (serverEvent.type === "mcp_list_tools.completed") {
+    if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+      const tools = serverEvent.tools || serverEvent.item?.tools;
+      handsetWs.send(
+        JSON.stringify({
+          event: "mcp_tools_ready",
+          count: tools ? tools.length : undefined
+        })
+      );
+    }
+  } else if (serverEvent.type === "response.mcp_call_arguments.done") {
+    if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+      handsetWs.send(
+        JSON.stringify({
+          event: "mcp_tool_call",
+          tool: serverEvent.name,
+          arguments: String(serverEvent.arguments ?? "{}").slice(0, 300)
+        })
+      );
+    }
+  } else if (
+    serverEvent.type === "response.output_item.done" &&
+    serverEvent.item?.type === "mcp_call"
+  ) {
+    if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+      const item = serverEvent.item;
+      handsetWs.send(
+        JSON.stringify(
+          item.error
+            ? {
+                event: "mcp_tool_error",
+                tool: item.name,
+                error: String(item.error).slice(0, 300)
+              }
+            : {
+                event: "mcp_tool_result",
+                tool: item.name,
+                result: String(item.output ?? "").slice(0, 300)
+              }
+        )
+      );
+    }
+  } else if (
+    serverEvent.type === "mcp_list_tools.failed" ||
+    serverEvent.type === "response.mcp_call.failed"
+  ) {
+    if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+      handsetWs.send(
+        JSON.stringify({
+          event: "mcp_tool_error",
+          error: serverEvent.type
+        })
+      );
+    }
   }
 }
 
