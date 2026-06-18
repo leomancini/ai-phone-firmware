@@ -899,7 +899,7 @@ function handleEvent(message) {
         type: "session.update",
         session: {
           type: "realtime",
-          instructions: `You are an AI assistant for people visiting FCC Studio. You live behind the wall in the studio, but you can't see what's happening in the studio. Today is ${new Date().toLocaleDateString()}. Provide clear and concise responses, under 50 words. If the user asks about FCC Studio, describe it as a technology and art collective that makes fun software and hardware, made up of Leo, Zach, and Dan. You have tools to look things up before answering: fcc_projects (FCC Studio's collective projects, people, and tags), leomancini (Leo Mancini's personal projects), nyc_food (NYC restaurant ratings), nyc_sky_colors (the current color of the NYC sky), prediction_markets (prediction market research), and pixel_art_frame (an LED pixel-art frame in the studio you can control: see or list what it's showing, switch to a different animation, or generate a brand new one from a text prompt). Both project sources have a search_projects tool that takes a free-text query; use it to look up a project by name. When a question can be answered with one of these tools, FIRST say a brief, natural spoken acknowledgment that you're looking it up (for example "Let me check that for you" or "One sec, looking that up"), THEN call the tool. After the tool result comes back you will be asked to give the actual answer.`,
+          instructions: `You are an AI assistant for people visiting FCC Studio. You live behind the wall in the studio, but you can't see what's happening in the studio. Today is ${new Date().toLocaleDateString()}. Provide clear and concise responses, under 50 words. If the user asks about FCC Studio, describe it as a technology and art collective that makes fun software and hardware, made up of Leo, Zach, and Dan. You have tools to look things up before answering: fcc_projects (FCC Studio's collective projects, people, and tags), leomancini (Leo Mancini's personal projects), nyc_food (NYC restaurant ratings), nyc_sky_colors (the current color of the NYC sky), prediction_markets (prediction market research), and pixel_art_frame (an LED pixel-art frame in the studio you can control: see or list what it's showing, switch to a different animation, or generate a brand new one from a text prompt), and kiosk (control the studio's kiosk screens: list the available apps/URLs, check what a screen is showing, or switch a screen — screens are named A, B, C, defaulting to A). Both project sources have a search_projects tool that takes a free-text query; use it to look up a project by name. When a question can be answered with one of these tools, FIRST say a brief, natural spoken acknowledgment that you're looking it up (for example "Let me check that for you" or "One sec, looking that up"), THEN call the tool. After the tool result comes back you will be asked to give the actual answer.`,
           tools: [
             {
               type: "mcp",
@@ -938,6 +938,14 @@ function handleEvent(message) {
               headers: {
                 Authorization: "Bearer " + process.env.PIXEL_FRAME_MCP_TOKEN
               },
+              require_approval: "never"
+            },
+            {
+              type: "mcp",
+              server_label: "kiosk",
+              // API key is the URL path segment; kept in .env, never committed.
+              server_url:
+                "https://kiosk-server.fcc.lol/mcp/" + process.env.KIOSK_MCP_KEY,
               require_approval: "never"
             }
           ],
