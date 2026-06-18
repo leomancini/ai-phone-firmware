@@ -44,6 +44,47 @@ let chunkTimeout = 500;
 let handsetState = "down";
 let ledOffTimer = null;
 let ledSafetyCheckInterval = null;
+let pendingToolAnswer = false;
+let activeResponse = false;
+
+// Ask the model to speak the answer using the tool result already in the
+// conversation. Forbidden from calling tools again (tool_choice: "none") so it
+// can't loop on "let me check...". Deferred until (a) no response is being
+// generated and (b) the acknowledgment ("let me check...") has finished
+// playing, otherwise the answer's audio starts on a new sox while the
+// acknowledgment is still draining and the two overlap. Callers re-invoke this
+// at response.done and at playback close, so it fires as soon as it's safe.
+function requestToolAnswer() {
+  if (
+    !pendingToolAnswer ||
+    activeResponse ||
+    isPlaying ||
+    playbackProcess ||
+    !ws ||
+    ws.readyState !== WebSocket.OPEN
+  ) {
+    return;
+  }
+  pendingToolAnswer = false;
+  if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+    handsetWs.send(
+      JSON.stringify({
+        event: "open_ai_realtime_client_message",
+        message: "Requesting spoken response after tool call"
+      })
+    );
+  }
+  ws.send(
+    JSON.stringify({
+      type: "response.create",
+      response: {
+        tool_choice: "none",
+        instructions:
+          "Use the tool result already in the conversation to answer the user's question now in a single spoken reply under 50 words. Do not call any tools."
+      }
+    })
+  );
+}
 
 function playWelcomeAudio() {
   return new Promise((resolve, reject) => {
@@ -668,46 +709,37 @@ async function playAudioChunk(base64Audio) {
     lastChunkTime = Date.now();
 
     if (!audioStream || !playbackProcess || playbackProcess.killed) {
-      if (playbackProcess) {
-        try {
-          playbackProcess.kill();
-          playbackProcess = null;
-        } catch (err) {
-          console.error("Error killing existing playback process:", err);
-        }
-      }
-
-      if (audioStream) {
-        try {
-          audioStream.end();
-          audioStream = null;
-        } catch (err) {
-          console.error("Error ending existing audio stream:", err);
-        }
-      }
-
-      audioStream = new PassThrough({ highWaterMark: 512 });
+      // Generous buffer so a fast burst of deltas (a long answer can deliver
+      // ~40s of audio in a few seconds) is held, not dropped, while sox plays
+      // it out in real time.
+      audioStream = new PassThrough({ highWaterMark: 1 << 20 });
       playbackStartTime = Date.now();
       isPlaying = true;
 
-      const header = createWavHeader(2000000);
-      audioStream.write(header);
-
+      // Feed sox RAW PCM (signed 16-bit, 24kHz, mono) rather than a WAV with a
+      // fixed-length header: raw has no length field, so there is no truncation
+      // cap and sox keeps draining its buffer until stdin is closed (which we
+      // do at response end). We never kill/recreate the process mid-response.
       playbackProcess = spawn("sox", [
         "-q",
-        "--buffer",
-        "64",
         "-t",
-        "wav",
+        "raw",
+        "-r",
+        "24000",
+        "-e",
+        "signed-integer",
+        "-b",
+        "16",
+        "-c",
+        "1",
         "-",
         "-t",
         "alsa",
         "plughw:3,0",
-        "rate",
-        "24k",
+        "--buffer",
+        "4096",
         "vol",
-        "5",
-        "stat"
+        "5"
       ]);
 
       if (!playbackProcess.pid) {
@@ -726,24 +758,13 @@ async function playAudioChunk(base64Audio) {
         }
       });
 
-      try {
-        audioStream.pipe(playbackProcess.stdin, { end: false });
-      } catch (error) {
-        console.error("Error setting up audio pipe:", error);
-        return;
-      }
+      // Default end:true — when we end() the stream after the last chunk, sox
+      // receives EOF, finishes the full buffer, then closes. The pipe applies
+      // backpressure for us, so writes are never dropped.
+      audioStream.pipe(playbackProcess.stdin);
 
-      playbackProcess.stdin.on("drain", () => {
-        if (audioStream && !audioStream.destroyed) {
-          audioStream.resume();
-        }
-      });
-
-      let stderrData = "";
-
-      playbackProcess.stderr.on("data", (data) => {
-        stderrData += data.toString();
-      });
+      // Drain stderr so its pipe buffer can't fill and stall sox.
+      playbackProcess.stderr.on("data", () => {});
 
       playbackProcess.on("close", (code) => {
         if (isPlaying && handsetState === "up") {
@@ -760,6 +781,10 @@ async function playAudioChunk(base64Audio) {
         isPlaying = false;
         playbackProcess = null;
         audioStream = null;
+
+        // The acknowledgment just finished playing; if a tool answer is
+        // waiting, request it now so it doesn't overlap the acknowledgment.
+        requestToolAnswer();
       });
     }
 
@@ -769,26 +794,7 @@ async function playAudioChunk(base64Audio) {
       playbackProcess &&
       !playbackProcess.killed
     ) {
-      try {
-        const canWrite = audioStream.write(audioData);
-        if (!canWrite) {
-          setTimeout(() => {
-            if (audioStream && !audioStream.destroyed) {
-              audioStream.resume();
-            }
-          }, 5);
-        }
-      } catch (error) {
-        console.error("Error writing audio data:", error);
-      }
-    } else {
-      if (audioStream) audioStream.end();
-      if (playbackProcess && !playbackProcess.killed) playbackProcess.kill();
-
-      audioStream = null;
-      playbackProcess = null;
-
-      setTimeout(() => playAudioChunk(base64Audio), 10);
+      audioStream.write(audioData);
     }
   } catch (error) {
     console.error("Error playing audio chunk:", error);
@@ -852,6 +858,29 @@ function endAudioPlayback() {
 function handleEvent(message) {
   const serverEvent = JSON.parse(message.toString());
 
+  if (process.env.DEBUG_EVENTS) {
+    const t = serverEvent.type;
+    if (t === "response.done") {
+      const items = (serverEvent.response?.output || [])
+        .map(
+          (o) =>
+            `${o.type}${o.error ? "!err" : ""}${
+              o.output != null ? "+out" : ""
+            }`
+        )
+        .join(",");
+      console.error(
+        `[evt] response.done status=${serverEvent.response?.status} output=[${items}]`
+      );
+    } else if (!t.includes("delta") && !t.includes("audio")) {
+      console.error(`[evt] ${t}`);
+    }
+  }
+
+  if (serverEvent.type === "response.created") {
+    activeResponse = true;
+  }
+
   if (serverEvent.type === "session.created") {
     sessionId = serverEvent.session;
     isResponseComplete = false;
@@ -862,7 +891,7 @@ function handleEvent(message) {
         type: "session.update",
         session: {
           type: "realtime",
-          instructions: `You are an AI assistant for people visiting FCC Studio. You live behind the wall in the studio, but you can't see what's happening in the studio. Today is ${new Date().toLocaleDateString()}. Provide clear and concise responses, under 50 words. If the user asks about FCC Studio, describe it as a technology and art collective that makes fun software and hardware, made up of Leo, Zach, and Dan. You have tools to look things up before answering: fcc_projects (FCC's projects, people, and tags), leomancini (Leo's personal projects), nyc_food (NYC restaurant ratings), nyc_sky_colors (the current color of the NYC sky), and prediction_markets (prediction market research). When a question can be answered with one of these tools, use it before responding.`,
+          instructions: `You are an AI assistant for people visiting FCC Studio. You live behind the wall in the studio, but you can't see what's happening in the studio. Today is ${new Date().toLocaleDateString()}. Provide clear and concise responses, under 50 words. If the user asks about FCC Studio, describe it as a technology and art collective that makes fun software and hardware, made up of Leo, Zach, and Dan. You have tools to look things up before answering: fcc_projects (FCC Studio's collective projects, people, and tags), leomancini (Leo Mancini's personal projects, such as Cyberdeck 25), nyc_food (NYC restaurant ratings), nyc_sky_colors (the current color of the NYC sky), and prediction_markets (prediction market research). When asked about a specific project by name, search by keyword/name (not by tag), and a project may live in EITHER fcc_projects or leomancini — if one source has no match, try the other before saying you couldn't find it. When a question can be answered with one of these tools, FIRST say a brief, natural spoken acknowledgment that you're looking it up (for example "Let me check that for you" or "One sec, looking that up"), THEN call the tool. After the tool result comes back you will be asked to give the actual answer.`,
           tools: [
             {
               type: "mcp",
@@ -1005,6 +1034,12 @@ function handleEvent(message) {
             }
           });
         }
+
+        // No more audio is coming for this response: close sox's input so it
+        // drains the full buffer and exits (which restarts recording above).
+        if (audioStream && !audioStream.destroyed) {
+          audioStream.end();
+        }
       } else {
         isResponseComplete = false;
         isPlaying = false;
@@ -1058,6 +1093,16 @@ function handleEvent(message) {
         )
       );
     }
+    // A tool result is now in the conversation, so the model owes a spoken
+    // answer. The MCP tool finishes AFTER its enclosing response.done, so if no
+    // response is currently active we request the answer right now; otherwise
+    // we defer to response.done to avoid an "active response exists" error.
+    if (!serverEvent.item?.error) {
+      pendingToolAnswer = true;
+      if (!activeResponse) {
+        requestToolAnswer();
+      }
+    }
   } else if (
     serverEvent.type === "mcp_list_tools.failed" ||
     serverEvent.type === "response.mcp_call.failed"
@@ -1067,6 +1112,27 @@ function handleEvent(message) {
         JSON.stringify({
           event: "mcp_tool_error",
           error: serverEvent.type
+        })
+      );
+    }
+  } else if (serverEvent.type === "response.done") {
+    // The response (acknowledgment + tool call) has ended. If the tool result
+    // already arrived, this is the moment to request the spoken answer; if it
+    // hasn't yet, the tool-result handler will request it once it does.
+    activeResponse = false;
+    requestToolAnswer();
+  } else if (serverEvent.type === "error") {
+    console.error(
+      "OpenAI error event:",
+      JSON.stringify(serverEvent.error || serverEvent)
+    );
+    if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
+      handsetWs.send(
+        JSON.stringify({
+          event: "open_ai_realtime_client_message",
+          message: `OpenAI error: ${
+            serverEvent.error?.message || serverEvent.error?.code || "unknown"
+          }`
         })
       );
     }
