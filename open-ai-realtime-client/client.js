@@ -46,14 +46,17 @@ let ledOffTimer = null;
 let ledSafetyCheckInterval = null;
 let pendingToolAnswer = false;
 let activeResponse = false;
+let toolRounds = 0;
+const MAX_TOOL_ROUNDS = 6;
 
-// Ask the model to speak the answer using the tool result already in the
-// conversation. Forbidden from calling tools again (tool_choice: "none") so it
-// can't loop on "let me check...". Deferred until (a) no response is being
-// generated and (b) the acknowledgment ("let me check...") has finished
-// playing, otherwise the answer's audio starts on a new sox while the
-// acknowledgment is still draining and the two overlap. Callers re-invoke this
-// at response.done and at playback close, so it fires as soon as it's safe.
+// After a server-side MCP tool call, the GA Realtime API ends the response
+// without continuing, so we must create a follow-up response to use the result.
+// That follow-up ALLOWS tools, so a multi-step task can proceed (e.g. look up
+// which frame, then act on it); the model either makes the next call or, when
+// done, gives the spoken answer. A per-user-turn counter (reset on speech) caps
+// the chain and forces a tool-free answer if it ever loops on "let me check...".
+// Deferred until no response is active AND playback is idle, so the answer's
+// audio doesn't start on a new sox while the acknowledgment is still draining.
 function requestToolAnswer() {
   if (
     !pendingToolAnswer ||
@@ -66,11 +69,15 @@ function requestToolAnswer() {
     return;
   }
   pendingToolAnswer = false;
+  toolRounds += 1;
+  const forceAnswer = toolRounds >= MAX_TOOL_ROUNDS;
   if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
     handsetWs.send(
       JSON.stringify({
         event: "open_ai_realtime_client_message",
-        message: "Requesting spoken response after tool call"
+        message: forceAnswer
+          ? "Forcing spoken answer (tool-round cap)"
+          : "Requesting next step after tool call"
       })
     );
   }
@@ -78,9 +85,10 @@ function requestToolAnswer() {
     JSON.stringify({
       type: "response.create",
       response: {
-        tool_choice: "none",
-        instructions:
-          "Use the tool result already in the conversation to answer the user's question now in a single spoken reply under 50 words. Do not call any tools."
+        ...(forceAnswer ? { tool_choice: "none" } : {}),
+        instructions: forceAnswer
+          ? "Answer the user now using the tool results already in the conversation, in a single spoken reply under 50 words. Do not call any tools."
+          : "You just received a tool result. If fully handling the user's request needs another tool call (e.g. you looked up which frame to use and now must act on it), make that call. Otherwise give a single short spoken reply under 50 words confirming what you did or answering the question. Do not repeat a tool call you already made with the same arguments."
       }
     })
   );
@@ -891,7 +899,7 @@ function handleEvent(message) {
         type: "session.update",
         session: {
           type: "realtime",
-          instructions: `You are an AI assistant for people visiting FCC Studio. You live behind the wall in the studio, but you can't see what's happening in the studio. Today is ${new Date().toLocaleDateString()}. Provide clear and concise responses, under 50 words. If the user asks about FCC Studio, describe it as a technology and art collective that makes fun software and hardware, made up of Leo, Zach, and Dan. You have tools to look things up before answering: fcc_projects (FCC Studio's collective projects, people, and tags), leomancini (Leo Mancini's personal projects), nyc_food (NYC restaurant ratings), nyc_sky_colors (the current color of the NYC sky), and prediction_markets (prediction market research). Both project sources have a search_projects tool that takes a free-text query; use it to look up a project by name. When a question can be answered with one of these tools, FIRST say a brief, natural spoken acknowledgment that you're looking it up (for example "Let me check that for you" or "One sec, looking that up"), THEN call the tool. After the tool result comes back you will be asked to give the actual answer.`,
+          instructions: `You are an AI assistant for people visiting FCC Studio. You live behind the wall in the studio, but you can't see what's happening in the studio. Today is ${new Date().toLocaleDateString()}. Provide clear and concise responses, under 50 words. If the user asks about FCC Studio, describe it as a technology and art collective that makes fun software and hardware, made up of Leo, Zach, and Dan. You have tools to look things up before answering: fcc_projects (FCC Studio's collective projects, people, and tags), leomancini (Leo Mancini's personal projects), nyc_food (NYC restaurant ratings), nyc_sky_colors (the current color of the NYC sky), prediction_markets (prediction market research), and pixel_art_frame (an LED pixel-art frame in the studio you can control: see or list what it's showing, switch to a different animation, or generate a brand new one from a text prompt). Both project sources have a search_projects tool that takes a free-text query; use it to look up a project by name. When a question can be answered with one of these tools, FIRST say a brief, natural spoken acknowledgment that you're looking it up (for example "Let me check that for you" or "One sec, looking that up"), THEN call the tool. After the tool result comes back you will be asked to give the actual answer.`,
           tools: [
             {
               type: "mcp",
@@ -922,6 +930,15 @@ function handleEvent(message) {
               server_label: "leomancini",
               server_url: "https://leomancini.net/mcp",
               require_approval: "never"
+            },
+            {
+              type: "mcp",
+              server_label: "pixel_art_frame",
+              server_url: "https://ai-pixel-art-frame.leo.gd/mcp",
+              headers: {
+                Authorization: "Bearer " + process.env.PIXEL_FRAME_MCP_TOKEN
+              },
+              require_approval: "never"
             }
           ],
           audio: {
@@ -947,6 +964,8 @@ function handleEvent(message) {
 
     startRecording(ws);
   } else if (serverEvent.type === "input_audio_buffer.speech_started") {
+    // New user turn: reset the per-turn tool-round cap.
+    toolRounds = 0;
     if (handsetWs && handsetWs.readyState === WebSocket.OPEN) {
       handsetWs.send(
         JSON.stringify({
